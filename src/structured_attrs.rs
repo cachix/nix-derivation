@@ -11,12 +11,66 @@ use serde_json::{Map, Number, Value};
 
 use crate::{Error, StorePath, store_path};
 
+pub(crate) const DERIVATION_META_FEATURE: &str = "derivation-meta";
+
+/// Metadata attached to a derivation but excluded from its quotient hash.
+///
+/// Nix transports this object as `__meta` inside the `__json` ATerm entry.
+/// The semantic representation keeps it separate so it is not exposed to the
+/// builder and can be omitted from derivation-modulo hashing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivationMeta {
+    object: Map<String, Value>,
+}
+
+impl DerivationMeta {
+    /// Parse a JSON object containing derivation metadata.
+    pub fn from_json_bytes(json: impl AsRef<[u8]>) -> Result<Self, Error> {
+        let json = json.as_ref();
+        validate_object(json)?;
+        Ok(Self {
+            object: parse_object(json),
+        })
+    }
+
+    /// Look up a top-level metadata value.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.object.get(key)
+    }
+
+    /// Iterate over metadata keys in canonical order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.object.iter().map(|(key, value)| (key.as_str(), value))
+    }
+
+    #[must_use]
+    /// Whether the metadata object has no entries.
+    pub fn is_empty(&self) -> bool {
+        self.object.is_empty()
+    }
+
+    #[must_use]
+    /// Canonical compact JSON with recursively sorted object keys.
+    pub fn canonical_json(&self) -> Vec<u8> {
+        canonical_object(&self.object)
+    }
+
+    fn from_object(object: Map<String, Value>) -> Self {
+        Self {
+            object: sort_object(object),
+        }
+    }
+}
+
 /// Validated structured attributes extracted from a derivation's `__json`
 /// transport entry.
 ///
-/// The original JSON bytes are retained for inspection. Parsing validates the
-/// complete value without materializing it; the typed value tree is built and
-/// recursively sorted on first use.
+/// The accepted JSON bytes are retained for inspection unless derivation
+/// metadata is extracted, in which case this value is rebuilt from the
+/// remaining semantic builder attributes. Parsing validates the complete value
+/// without materializing it; the typed value tree is built and recursively
+/// sorted on first use.
 #[derive(Debug)]
 pub struct StructuredAttrs {
     raw: Vec<u8>,
@@ -39,7 +93,10 @@ impl StructuredAttrs {
         })
     }
 
-    /// JSON bytes exactly as they appeared in the parsed derivation.
+    /// JSON bytes backing this semantic structured-attribute value.
+    ///
+    /// These are the original transport bytes for ordinary attributes and
+    /// canonical filtered bytes after `__meta` extraction.
     #[must_use]
     pub fn raw_json(&self) -> &[u8] {
         &self.raw
@@ -80,6 +137,115 @@ impl StructuredAttrs {
 
     fn object(&self) -> &Map<String, Value> {
         self.object.get_or_init(|| parse_object(&self.raw))
+    }
+
+    /// Extract opted-in `__meta` from the legacy structured-attribute
+    /// transport representation.
+    pub(super) fn into_derivation_parts(self) -> Result<(Self, Option<DerivationMeta>), Error> {
+        let has_object_meta = matches!(self.get("__meta"), Some(Value::Object(_)));
+        let meta_enabled = self
+            .get("requiredSystemFeatures")
+            .and_then(Value::as_array)
+            .is_some_and(|features| {
+                features
+                    .iter()
+                    .any(|feature| feature.as_str() == Some(DERIVATION_META_FEATURE))
+            });
+        if !has_object_meta || !meta_enabled {
+            return Ok((self, None));
+        }
+
+        let mut object = self
+            .object
+            .into_inner()
+            .expect("structured attributes are parsed during construction");
+        let features = object["requiredSystemFeatures"]
+            .as_array()
+            .expect("feature detection checked the array")
+            .clone();
+        validate_sorted_features(&features)?;
+
+        let Value::Object(meta) = object
+            .remove("__meta")
+            .expect("metadata presence was checked")
+        else {
+            unreachable!("metadata object was checked")
+        };
+        let filtered: Vec<Value> = features
+            .iter()
+            .filter(|feature| feature.as_str() != Some(DERIVATION_META_FEATURE))
+            .cloned()
+            .collect();
+        if filtered.is_empty() {
+            object.remove("requiredSystemFeatures");
+        } else {
+            object.insert("requiredSystemFeatures".to_owned(), Value::Array(filtered));
+        }
+
+        Ok((
+            Self::from_object(object),
+            Some(DerivationMeta::from_object(meta)),
+        ))
+    }
+
+    pub(super) fn validate_for_meta(&self) -> Result<(), Error> {
+        if self.get("__meta").is_some() {
+            return Err(Error::StructuredAttrs(
+                "structured attributes already contain the reserved __meta key".to_owned(),
+            ));
+        }
+        let Some(features) = self.get("requiredSystemFeatures") else {
+            return Ok(());
+        };
+        let Value::Array(features) = features else {
+            return Err(Error::StructuredAttrs(
+                "requiredSystemFeatures must be an array when using derivation-meta".to_owned(),
+            ));
+        };
+        validate_sorted_features(features)?;
+        if features
+            .iter()
+            .any(|feature| feature.as_str() == Some(DERIVATION_META_FEATURE))
+        {
+            return Err(Error::StructuredAttrs(
+                "derivation-meta must be represented by the derivation metadata field".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn canonical_json_with_meta(&self, meta: &DerivationMeta) -> Vec<u8> {
+        let mut object = self.object().clone();
+        object.insert("__meta".to_owned(), Value::Object(meta.object.clone()));
+
+        let mut features =
+            object
+                .remove("requiredSystemFeatures")
+                .map_or_else(Vec::new, |features| {
+                    features
+                        .as_array()
+                        .expect("metadata validation checked requiredSystemFeatures")
+                        .clone()
+                });
+        let insertion = features.partition_point(|feature| {
+            feature
+                .as_str()
+                .expect("metadata validation checked feature strings")
+                < DERIVATION_META_FEATURE
+        });
+        features.insert(insertion, Value::String(DERIVATION_META_FEATURE.to_owned()));
+        object.insert("requiredSystemFeatures".to_owned(), Value::Array(features));
+        canonical_object(&sort_object(object))
+    }
+
+    fn from_object(object: Map<String, Value>) -> Self {
+        let object = sort_object(object);
+        let raw = canonical_object(&object);
+        Self {
+            raw,
+            object: OnceLock::from(object),
+            canonical: OnceLock::new(),
+        }
     }
 }
 
@@ -358,6 +524,26 @@ fn sort_object(mut object: Map<String, Value>) -> Map<String, Value> {
     }
     object.sort_keys();
     object
+}
+
+fn validate_sorted_features(features: &[Value]) -> Result<(), Error> {
+    let features = features
+        .iter()
+        .map(|feature| {
+            feature.as_str().ok_or_else(|| {
+                Error::StructuredAttrs(
+                    "requiredSystemFeatures entries must be strings when using derivation-meta"
+                        .to_owned(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if features.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(Error::StructuredAttrs(
+            "requiredSystemFeatures must be strictly sorted when using derivation-meta".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn sort_value(value: &mut Value) {

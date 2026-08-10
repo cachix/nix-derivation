@@ -56,10 +56,14 @@ pub(super) fn parse(bytes: &[u8], name: &str) -> Result<Derivation, Error> {
     // Nix extracts this transport entry into its structured-attributes field.
     // Validate it now, but defer building and sorting the JSON tree until a
     // caller actually serializes or materializes the structured attributes.
-    let structured_attrs = environment
-        .remove("__json")
-        .map(crate::structured_attrs::StructuredAttrs::parse)
-        .transpose()?;
+    let (structured_attrs, meta) = match environment.remove("__json") {
+        Some(encoded) => {
+            let attrs = crate::structured_attrs::StructuredAttrs::parse(encoded)?;
+            let (attrs, meta) = attrs.into_derivation_parts()?;
+            (Some(attrs), meta)
+        }
+        None => (None, None),
+    };
 
     let derivation = Derivation {
         name: name.to_owned(),
@@ -71,6 +75,7 @@ pub(super) fn parse(bytes: &[u8], name: &str) -> Result<Derivation, Error> {
         arguments,
         environment,
         structured_attrs,
+        meta,
         aterm_size_hint: bytes.len(),
     };
     // Fixed-output serialization derives the path from these out-of-band

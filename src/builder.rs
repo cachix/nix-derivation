@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 use crate::{
-    Derivation, DerivationOutput, Error, InputDerivation, Output, StorePath, StructuredAttrs,
+    Derivation, DerivationMeta, DerivationOutput, Error, InputDerivation, Output, StorePath,
+    StructuredAttrs,
 };
 
 /// Construct or edit a derivation, validating all invariants at the end.
@@ -18,6 +19,7 @@ pub struct DerivationBuilder {
     arguments: Vec<String>,
     environment: BTreeMap<String, Vec<u8>>,
     structured_attrs: Option<StructuredAttrs>,
+    meta: Option<DerivationMeta>,
     aterm_size_hint: usize,
 }
 
@@ -38,6 +40,7 @@ impl DerivationBuilder {
             arguments: Vec::new(),
             environment: BTreeMap::new(),
             structured_attrs: None,
+            meta: None,
             aterm_size_hint: 256,
         }
     }
@@ -54,6 +57,7 @@ impl DerivationBuilder {
             arguments: derivation.arguments,
             environment: derivation.environment,
             structured_attrs: derivation.structured_attrs,
+            meta: derivation.meta,
             aterm_size_hint: derivation.aterm_size_hint,
         }
     }
@@ -99,6 +103,20 @@ impl DerivationBuilder {
     /// Enable structured attributes with a validated JSON object.
     pub fn structured_attrs(mut self, attrs: StructuredAttrs) -> Self {
         self.structured_attrs = Some(attrs);
+        self
+    }
+
+    /// Attach metadata that is serialized as structured `__meta` but omitted
+    /// from builder inputs and derivation-modulo hashes.
+    #[must_use]
+    pub fn meta(mut self, meta: DerivationMeta) -> Self {
+        if self.structured_attrs.is_none() {
+            self.structured_attrs = Some(
+                StructuredAttrs::from_json_bytes(b"{}")
+                    .expect("the empty object is valid structured JSON"),
+            );
+        }
+        self.meta = Some(meta);
         self
     }
 
@@ -201,9 +219,14 @@ impl DerivationBuilder {
         &mut self.structured_attrs
     }
 
+    /// Mutably access the optional derivation metadata.
+    pub fn meta_mut(&mut self) -> &mut Option<DerivationMeta> {
+        &mut self.meta
+    }
+
     /// Validate and finish construction.
     pub fn build(self) -> Result<ValidatedDerivation, Error> {
-        let mut derivation = self.into_derivation();
+        let mut derivation = self.into_derivation()?;
         if derivation.needs_input_hashes_for_output_paths()? {
             return Err(Error::InvalidDerivation(
                 "resolving derivation output paths with inputs requires input derivation modulo hashes"
@@ -247,13 +270,24 @@ impl DerivationBuilder {
         F: FnMut(&StorePath) -> Result<H, E>,
         H: Into<crate::InputDerivationHash>,
     {
-        let mut derivation = self.into_derivation();
+        let mut derivation = self.into_derivation()?;
         derivation.try_fill_output_paths(resolve)?;
         Ok(ValidatedDerivation(derivation))
     }
 
-    fn into_derivation(self) -> Derivation {
-        Derivation {
+    fn into_derivation(mut self) -> Result<Derivation, Error> {
+        if let Some(attrs) = self.structured_attrs.take() {
+            let (attrs, extracted_meta) = attrs.into_derivation_parts()?;
+            if self.meta.is_some() && extracted_meta.is_some() {
+                return Err(Error::InvalidDerivation(
+                    "derivation metadata was provided both explicitly and in structured attributes"
+                        .to_owned(),
+                ));
+            }
+            self.structured_attrs = Some(attrs);
+            self.meta = self.meta.or(extracted_meta);
+        }
+        Ok(Derivation {
             name: self.name,
             outputs: self.outputs,
             input_derivations: self.input_derivations,
@@ -263,8 +297,9 @@ impl DerivationBuilder {
             arguments: self.arguments,
             environment: self.environment,
             structured_attrs: self.structured_attrs,
+            meta: self.meta,
             aterm_size_hint: self.aterm_size_hint,
-        }
+        })
     }
 }
 
