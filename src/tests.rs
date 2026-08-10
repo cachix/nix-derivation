@@ -280,6 +280,80 @@ fn structured_attrs_match_nix_shell_shape() {
 }
 
 #[test]
+fn structured_attrs_files_merge_outputs_and_rewrite_borrowed_values() {
+    let out_placeholder = store_path::hash_placeholder("out");
+    let dev_placeholder = store_path::hash_placeholder("dev");
+    let attrs = crate::StructuredAttrs::from_json_bytes(
+        format!(
+            r#"{{"after":"{dev_placeholder}-{out_placeholder}","before":"plain","nested":{{"{out_placeholder}":"{dev_placeholder}"}},"outputs":{{"stale":"ignored"}}}}"#
+        )
+        .into_bytes(),
+    )
+    .unwrap();
+    let dev = "/nix/store/11111111111111111111111111111111-example-dev";
+    let out = "/nix/store/22222222222222222222222222222222-example";
+    let output_paths = BTreeMap::from([
+        ("dev".to_owned(), dev.parse().unwrap()),
+        ("out".to_owned(), out.parse().unwrap()),
+    ]);
+
+    let files = crate::structured_attrs::files(&attrs, &output_paths).unwrap();
+
+    assert_eq!(
+        files.json,
+        format!(
+            r#"{{"after":"{dev}-{out}","before":"plain","nested":{{"{out}":"{dev}"}},"outputs":{{"dev":"{dev}","out":"{out}"}}}}"#
+        )
+        .as_bytes()
+    );
+    assert_eq!(
+        files.shell,
+        format!(
+            "declare after='{dev}-{out}'\ndeclare before='plain'\ndeclare -A nested=(['{out}']='{dev}' )\ndeclare -A outputs=(['dev']='{dev}' ['out']='{out}' )\n"
+        )
+        .as_bytes()
+    );
+    assert_eq!(attrs.get("outputs").unwrap()["stale"], "ignored");
+    assert_eq!(
+        attrs.get("nested").unwrap()[&out_placeholder],
+        dev_placeholder
+    );
+}
+
+#[test]
+fn structured_attrs_files_rewrite_many_repeated_placeholders() {
+    const REPETITIONS: usize = 50_000;
+
+    let out_placeholder = store_path::hash_placeholder("out");
+    let attrs = crate::StructuredAttrs::from_json_bytes(
+        format!(r#"{{"message":"{}"}}"#, out_placeholder.repeat(REPETITIONS)).into_bytes(),
+    )
+    .unwrap();
+    let dev = "/nix/store/11111111111111111111111111111111-example-dev";
+    let out = "/nix/store/22222222222222222222222222222222-example";
+    let output_paths = BTreeMap::from([
+        ("dev".to_owned(), dev.parse().unwrap()),
+        ("out".to_owned(), out.parse().unwrap()),
+    ]);
+
+    let files = crate::structured_attrs::files(&attrs, &output_paths).unwrap();
+    let expected_message = out.repeat(REPETITIONS);
+
+    assert_eq!(
+        files.json,
+        format!(r#"{{"message":"{expected_message}","outputs":{{"dev":"{dev}","out":"{out}"}}}}"#)
+            .as_bytes()
+    );
+    assert_eq!(
+        files.shell,
+        format!(
+            "declare message='{expected_message}'\ndeclare -A outputs=(['dev']='{dev}' ['out']='{out}' )\n"
+        )
+        .as_bytes()
+    );
+}
+
+#[test]
 fn invalid_structured_attrs_are_rejected_during_parsing() {
     for encoded in ["not-json", "[]", r#"{"x":1e400}"#] {
         let escaped = encoded.replace('"', "\\\"");
