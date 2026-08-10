@@ -1,0 +1,25 @@
+[package]
+name = "nix-derivation"
+description = "Pure Rust Nix derivation parsing, serialization, and hashing"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/cachix/nix-derivation"
+readme = "README.md"
+keywords = ["nix", "derivation", "aterm"]
+categories = ["parser-implementations", "data-structures"]
+
+[dependencies]
+base64 = "0.22"
+memchr = "2"
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[[bench]]
+name = "parse"
+harness = false
+
+[[bench]]
+name = "corpus"
+harness = false
