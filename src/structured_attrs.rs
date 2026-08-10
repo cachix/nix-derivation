@@ -1,6 +1,9 @@
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::sync::OnceLock;
 
+use memchr::memchr_iter;
 use serde_json::{Map, Number, Value};
 
 use crate::{Error, StorePath, store_path};
@@ -126,7 +129,7 @@ pub(super) fn files(
     attrs: &StructuredAttrs,
     output_paths: &BTreeMap<String, StorePath>,
 ) -> Result<StructuredAttrsFiles, Error> {
-    let mut object = attrs.object().clone();
+    let object = attrs.object();
     if object.contains_key("exportReferencesGraph") {
         return Err(Error::StructuredAttrs(
             "exportReferencesGraph requires store metadata and cannot be generated here".to_owned(),
@@ -138,34 +141,88 @@ pub(super) fn files(
             "structured attributes require at least one concrete output path".to_owned(),
         ));
     }
-    let outputs: Map<String, Value> = output_paths
-        .keys()
-        .map(|name| {
-            (
-                name.clone(),
-                Value::String(store_path::hash_placeholder(name)),
-            )
-        })
-        .collect();
-    object.insert("outputs".to_owned(), Value::Object(outputs));
-    object = sort_object(object);
 
-    let json = String::from_utf8(canonical_object(&object))
-        .expect("canonical JSON made from strings is valid UTF-8");
-    let shell = write_shell(&object);
-    let rewrite = |mut value: String| {
-        for (name, path) in output_paths {
-            value = value.replace(
-                &store_path::hash_placeholder(name),
-                &path.to_absolute_path(),
-            );
-        }
-        value.into_bytes()
-    };
+    let replacements = OutputReplacements::new(output_paths);
+    let mut json = Vec::new();
+    write_attrs_json(object, &replacements, &mut json);
     Ok(StructuredAttrsFiles {
-        json: rewrite(json),
-        shell: rewrite(shell),
+        json,
+        shell: write_attrs_shell(object, &replacements).into_bytes(),
     })
+}
+
+struct OutputReplacement<'a> {
+    name: &'a str,
+    path: String,
+}
+
+struct OutputReplacements<'a> {
+    entries: Vec<OutputReplacement<'a>>,
+    placeholders: HashMap<String, usize>,
+    placeholder_len: usize,
+}
+
+impl<'a> OutputReplacements<'a> {
+    fn new(output_paths: &'a BTreeMap<String, StorePath>) -> Self {
+        let entries: Vec<_> = output_paths
+            .iter()
+            .map(|(name, path)| OutputReplacement {
+                name,
+                path: path.to_absolute_path(),
+            })
+            .collect();
+        let mut placeholders = HashMap::with_capacity(entries.len());
+        for (index, replacement) in entries.iter().enumerate() {
+            placeholders
+                .entry(store_path::hash_placeholder(replacement.name))
+                .or_insert(index);
+        }
+        let placeholder_len = placeholders.keys().next().map_or(0, String::len);
+        debug_assert!(
+            placeholders
+                .keys()
+                .all(|placeholder| placeholder.len() == placeholder_len)
+        );
+        Self {
+            entries,
+            placeholders,
+            placeholder_len,
+        }
+    }
+
+    fn rewrite<'value>(&self, value: &'value str) -> Cow<'value, str> {
+        let mut cursor = 0;
+        let mut rewritten = None;
+
+        for position in memchr_iter(b'/', value.as_bytes()) {
+            if position < cursor {
+                continue;
+            }
+            let end = position + self.placeholder_len;
+            let Some(placeholder) = value.get(position..end) else {
+                continue;
+            };
+            let Some(replacement) = self
+                .placeholders
+                .get(placeholder)
+                .map(|index| &self.entries[*index])
+            else {
+                continue;
+            };
+            let output = rewritten.get_or_insert_with(|| String::with_capacity(value.len()));
+            output.push_str(&value[cursor..position]);
+            output.push_str(&replacement.path);
+            cursor = end;
+        }
+
+        match rewritten {
+            Some(mut rewritten) => {
+                rewritten.push_str(&value[cursor..]);
+                Cow::Owned(rewritten)
+            }
+            None => Cow::Borrowed(value),
+        }
+    }
 }
 
 fn parse_object(encoded: &[u8]) -> Result<Map<String, Value>, Error> {
@@ -198,48 +255,124 @@ fn sort_value(value: Value) -> Value {
 
 fn canonical_object(object: &Map<String, Value>) -> Vec<u8> {
     let mut output = Vec::new();
-    write_json_value(&Value::Object(object.clone()), &mut output);
+    write_json_object(object, None, &mut output);
     output
 }
 
-fn write_json_value(value: &Value, output: &mut Vec<u8>) {
+fn write_attrs_json(
+    object: &Map<String, Value>,
+    replacements: &OutputReplacements<'_>,
+    output: &mut Vec<u8>,
+) {
+    output.push(b'{');
+    let mut first = true;
+    let mut wrote_outputs = false;
+
+    for (key, value) in object {
+        if !wrote_outputs && key.as_str() >= "outputs" {
+            write_outputs_json(replacements, &mut first, output);
+            wrote_outputs = true;
+        }
+        if key == "outputs" {
+            continue;
+        }
+        write_json_entry(key, value, Some(replacements), &mut first, output);
+    }
+    if !wrote_outputs {
+        write_outputs_json(replacements, &mut first, output);
+    }
+    output.push(b'}');
+}
+
+fn write_outputs_json(
+    replacements: &OutputReplacements<'_>,
+    first: &mut bool,
+    output: &mut Vec<u8>,
+) {
+    write_json_separator(first, output);
+    write_json_string("outputs", None, output);
+    output.extend_from_slice(b":{");
+    for (index, replacement) in replacements.entries.iter().enumerate() {
+        if index != 0 {
+            output.push(b',');
+        }
+        write_json_string(replacement.name, None, output);
+        output.push(b':');
+        write_json_string(&replacement.path, None, output);
+    }
+    output.push(b'}');
+}
+
+fn write_json_entry(
+    key: &str,
+    value: &Value,
+    replacements: Option<&OutputReplacements<'_>>,
+    first: &mut bool,
+    output: &mut Vec<u8>,
+) {
+    write_json_separator(first, output);
+    write_json_string(key, replacements, output);
+    output.push(b':');
+    write_json_value(value, replacements, output);
+}
+
+fn write_json_separator(first: &mut bool, output: &mut Vec<u8>) {
+    if *first {
+        *first = false;
+    } else {
+        output.push(b',');
+    }
+}
+
+fn write_json_value(
+    value: &Value,
+    replacements: Option<&OutputReplacements<'_>>,
+    output: &mut Vec<u8>,
+) {
     match value {
         Value::Null => output.extend_from_slice(b"null"),
         Value::Bool(true) => output.extend_from_slice(b"true"),
         Value::Bool(false) => output.extend_from_slice(b"false"),
         Value::Number(number) => output.extend_from_slice(nix_number(number).as_bytes()),
-        Value::String(value) => {
-            serde_json::to_writer(output, value)
-                .expect("serializing a parsed JSON string cannot fail");
-        }
+        Value::String(value) => write_json_string(value, replacements, output),
         Value::Array(values) => {
             output.push(b'[');
             for (index, value) in values.iter().enumerate() {
                 if index != 0 {
                     output.push(b',');
                 }
-                write_json_value(value, output);
+                write_json_value(value, replacements, output);
             }
             output.push(b']');
         }
-        Value::Object(values) => {
-            output.push(b'{');
-            let sorted: BTreeMap<&str, &Value> = values
-                .iter()
-                .map(|(key, value)| (key.as_str(), value))
-                .collect();
-            for (index, (key, value)) in sorted.into_iter().enumerate() {
-                if index != 0 {
-                    output.push(b',');
-                }
-                serde_json::to_writer(&mut *output, key)
-                    .expect("serializing a parsed JSON key cannot fail");
-                output.push(b':');
-                write_json_value(value, output);
-            }
-            output.push(b'}');
-        }
+        Value::Object(values) => write_json_object(values, replacements, output),
     }
+}
+
+fn write_json_object(
+    values: &Map<String, Value>,
+    replacements: Option<&OutputReplacements<'_>>,
+    output: &mut Vec<u8>,
+) {
+    // StructuredAttrs recursively sorts every object during construction, so
+    // iteration is canonical even if serde_json's preserve_order feature is
+    // enabled elsewhere in the dependency graph.
+    output.push(b'{');
+    let mut first = true;
+    for (key, value) in values {
+        write_json_entry(key, value, replacements, &mut first, output);
+    }
+    output.push(b'}');
+}
+
+fn write_json_string(
+    value: &str,
+    replacements: Option<&OutputReplacements<'_>>,
+    output: &mut Vec<u8>,
+) {
+    let value = replacements.map_or_else(|| Cow::Borrowed(value), |items| items.rewrite(value));
+    serde_json::to_writer(output, value.as_ref())
+        .expect("serializing a parsed JSON string cannot fail");
 }
 
 fn nix_number(number: &Number) -> String {
@@ -326,98 +459,142 @@ fn nix_number(number: &Number) -> String {
     formatted
 }
 
-fn write_shell(object: &Map<String, Value>) -> String {
-    // Sort explicitly so this remains stable even if a downstream dependency
-    // enables serde_json's `preserve_order` feature.
-    let sorted: BTreeMap<&str, &Value> = object
-        .iter()
-        .map(|(key, value)| (key.as_str(), value))
-        .collect();
+fn write_attrs_shell(object: &Map<String, Value>, replacements: &OutputReplacements<'_>) -> String {
     let mut shell = String::new();
-    for (key, value) in sorted {
-        if !is_shell_variable(key) {
+    let mut wrote_outputs = false;
+
+    for (key, value) in object {
+        if !wrote_outputs && key.as_str() >= "outputs" {
+            write_outputs_shell(replacements, &mut shell);
+            wrote_outputs = true;
+        }
+        if key == "outputs" {
             continue;
         }
-        if let Some(value) = simple(value) {
-            shell.push_str("declare ");
-            shell.push_str(key);
-            shell.push('=');
-            shell.push_str(&value);
-            shell.push('\n');
-        } else if let Value::Array(values) = value {
-            let Some(values) = values.iter().map(simple).collect::<Option<Vec<_>>>() else {
-                continue;
-            };
-            shell.push_str("declare -a ");
-            shell.push_str(key);
-            shell.push_str("=(");
-            for value in values {
-                shell.push_str(&value);
-                shell.push(' ');
-            }
-            shell.push_str(")\n");
-        } else if let Value::Object(values) = value {
-            let sorted: BTreeMap<&str, &Value> = values
-                .iter()
-                .map(|(key, value)| (key.as_str(), value))
-                .collect();
-            let Some(values) = sorted
-                .into_iter()
-                .map(|(key, value)| simple(value).map(|value| (key, value)))
-                .collect::<Option<Vec<_>>>()
-            else {
-                continue;
-            };
-            shell.push_str("declare -A ");
-            shell.push_str(key);
-            shell.push_str("=(");
-            for (inner_key, value) in values {
-                shell.push('[');
-                shell.push_str(&shell_quote(inner_key));
-                shell.push_str("]=");
-                shell.push_str(&value);
-                shell.push(' ');
-            }
-            shell.push_str(")\n");
-        }
+        write_shell_entry(key, value, replacements, &mut shell);
+    }
+    if !wrote_outputs {
+        write_outputs_shell(replacements, &mut shell);
     }
     shell
 }
 
-fn simple(value: &Value) -> Option<String> {
-    match value {
-        Value::Null => Some("''".to_owned()),
-        Value::Bool(true) => Some("1".to_owned()),
-        Value::Bool(false) => Some(String::new()),
-        Value::String(value) => Some(shell_quote(value)),
-        Value::Number(number) => integral_number(number),
-        Value::Array(_) | Value::Object(_) => None,
+fn write_outputs_shell(replacements: &OutputReplacements<'_>, shell: &mut String) {
+    shell.push_str("declare -A outputs=(");
+    for replacement in &replacements.entries {
+        shell.push('[');
+        write_shell_quote(replacement.name, None, shell);
+        shell.push_str("]=");
+        write_shell_quote(&replacement.path, None, shell);
+        shell.push(' ');
+    }
+    shell.push_str(")\n");
+}
+
+fn write_shell_entry(
+    key: &str,
+    value: &Value,
+    replacements: &OutputReplacements<'_>,
+    shell: &mut String,
+) {
+    if !is_shell_variable(key) {
+        return;
+    }
+    if is_simple(value) {
+        shell.push_str("declare ");
+        shell.push_str(key);
+        shell.push('=');
+        write_simple(value, replacements, shell);
+        shell.push('\n');
+    } else if let Value::Array(values) = value {
+        if !values.iter().all(is_simple) {
+            return;
+        }
+        shell.push_str("declare -a ");
+        shell.push_str(key);
+        shell.push_str("=(");
+        for value in values {
+            write_simple(value, replacements, shell);
+            shell.push(' ');
+        }
+        shell.push_str(")\n");
+    } else if let Value::Object(values) = value {
+        if !values.values().all(is_simple) {
+            return;
+        }
+        shell.push_str("declare -A ");
+        shell.push_str(key);
+        shell.push_str("=(");
+        for (inner_key, value) in values {
+            shell.push('[');
+            write_shell_quote(inner_key, Some(replacements), shell);
+            shell.push_str("]=");
+            write_simple(value, replacements, shell);
+            shell.push(' ');
+        }
+        shell.push_str(")\n");
     }
 }
 
-fn integral_number(number: &Number) -> Option<String> {
+fn is_simple(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) | Value::String(_) => true,
+        Value::Number(number) => integral_number(number).is_some(),
+        Value::Array(_) | Value::Object(_) => false,
+    }
+}
+
+fn write_simple(value: &Value, replacements: &OutputReplacements<'_>, output: &mut String) {
+    match value {
+        Value::Null => output.push_str("''"),
+        Value::Bool(true) => output.push('1'),
+        Value::Bool(false) => {}
+        Value::String(value) => write_shell_quote(value, Some(replacements), output),
+        Value::Number(number) => match integral_number(number)
+            .expect("write_simple is called only for simple values")
+        {
+            IntegralNumber::I64(value) => write!(output, "{value}").expect("writing to a String"),
+            IntegralNumber::U64(value) => write!(output, "{value}").expect("writing to a String"),
+            IntegralNumber::Float(value) => {
+                write!(output, "{value:.0}").expect("writing to a String");
+            }
+        },
+        Value::Array(_) | Value::Object(_) => unreachable!("nested values are not simple"),
+    }
+}
+
+enum IntegralNumber {
+    I64(i64),
+    U64(u64),
+    Float(f64),
+}
+
+fn integral_number(number: &Number) -> Option<IntegralNumber> {
     if let Some(value) = number.as_i64() {
-        Some(value.to_string())
+        Some(IntegralNumber::I64(value))
     } else if let Some(value) = number.as_u64() {
-        Some(value.to_string())
+        Some(IntegralNumber::U64(value))
     } else {
         let value = number.as_f64()?;
-        (value.is_finite() && value.fract() == 0.0).then(|| format!("{value:.0}"))
+        (value.is_finite() && value.fract() == 0.0).then_some(IntegralNumber::Float(value))
     }
 }
 
-fn shell_quote(value: &str) -> String {
-    let mut quoted = String::with_capacity(value.len() + 2);
-    quoted.push('\'');
+fn write_shell_quote(
+    value: &str,
+    replacements: Option<&OutputReplacements<'_>>,
+    output: &mut String,
+) {
+    let value = replacements.map_or_else(|| Cow::Borrowed(value), |items| items.rewrite(value));
+    output.push('\'');
     for character in value.chars() {
         if character == '\'' {
-            quoted.push_str("'\\''");
+            output.push_str("'\\''");
         } else {
-            quoted.push(character);
+            output.push(character);
         }
     }
-    quoted.push('\'');
-    quoted
+    output.push('\'');
 }
 
 fn is_shell_variable(value: &str) -> bool {
