@@ -82,9 +82,9 @@ fn dynamic_inputs_are_constructible_and_walkable() {
         .with_dynamic_output("generated", nested)
         .unwrap();
     let derivation = DerivationBuilder::new("dynamic", "x86_64-linux", "/bin/sh")
-        .output("out", output())
+        .output("out", Output::Deferred)
         .input_derivation(INPUT_DRV.parse().unwrap(), input)
-        .build_with_input_hashes(|_| [0x42; 32])
+        .build()
         .unwrap();
 
     let input = derivation.input_derivations().values().next().unwrap();
@@ -138,9 +138,9 @@ fn dynamic_input_construction_enforces_the_parser_limit() {
     assert!(matches!(overflow, Err(Error::InvalidDerivation(_))));
 
     DerivationBuilder::new("deep", "x86_64-linux", "/bin/sh")
-        .output("out", output())
+        .output("out", Output::Deferred)
         .input_derivation(INPUT_DRV.parse().unwrap(), input)
-        .build_with_input_hashes(|_| [0x42; 32])
+        .build()
         .unwrap();
 }
 

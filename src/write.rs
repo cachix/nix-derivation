@@ -1,27 +1,66 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 
-use crate::InputDerivation;
 use crate::{CAHash, ContentAddressMethod, Derivation, HashAlgorithm, NixHash, Output, StorePath};
+use crate::{DerivationModuloHash, InputDerivation};
 
-pub(super) fn serialize(
+pub(super) type HashModuloInputs = BTreeMap<DerivationModuloHash, BTreeSet<String>>;
+
+trait AtermForm {
+    fn uses_dynamic_wrapper(&self, derivation: &Derivation) -> bool;
+    fn write_output(
+        &self,
+        derivation: &Derivation,
+        writer: &mut impl Write,
+        name: &str,
+        output: &Output,
+    ) -> io::Result<()>;
+    fn write_inputs(&self, derivation: &Derivation, writer: &mut impl Write) -> io::Result<()>;
+    fn environment_value<'a>(
+        &self,
+        derivation: &Derivation,
+        key: &str,
+        value: &'a [u8],
+    ) -> &'a [u8];
+}
+
+struct FullAterm;
+struct InputModuloAterm<'a>(&'a HashModuloInputs);
+struct OutputModuloAterm<'a>(&'a HashModuloInputs);
+
+pub(super) fn serialize(derivation: &Derivation, writer: &mut impl Write) -> io::Result<()> {
+    serialize_form(derivation, writer, FullAterm)
+}
+
+pub(super) fn serialize_input_modulo(
     derivation: &Derivation,
     writer: &mut impl Write,
-    mask_outputs: bool,
-    actual_inputs: Option<&BTreeMap<[u8; 32], BTreeSet<String>>>,
+    inputs: &HashModuloInputs,
 ) -> io::Result<()> {
-    if derivation
-        .input_derivations
-        .values()
-        .any(InputDerivation::is_dynamic)
-    {
+    serialize_form(derivation, writer, InputModuloAterm(inputs))
+}
+
+pub(super) fn serialize_output_modulo(
+    derivation: &Derivation,
+    writer: &mut impl Write,
+    inputs: &HashModuloInputs,
+) -> io::Result<()> {
+    serialize_form(derivation, writer, OutputModuloAterm(inputs))
+}
+
+fn serialize_form<F: AtermForm>(
+    derivation: &Derivation,
+    writer: &mut impl Write,
+    form: F,
+) -> io::Result<()> {
+    if form.uses_dynamic_wrapper(derivation) {
         writer.write_all(b"DrvWithVersion(\"xp-dyn-drv\",")?;
     } else {
         writer.write_all(b"Derive(")?;
     }
-    write_outputs(derivation, writer, mask_outputs)?;
+    write_outputs(derivation, writer, &form)?;
     writer.write_all(b",")?;
-    write_inputs(derivation, writer, actual_inputs)?;
+    form.write_inputs(derivation, writer)?;
     writer.write_all(b",")?;
     write_store_paths(writer, derivation.input_sources.iter())?;
     writer.write_all(b",")?;
@@ -34,14 +73,14 @@ pub(super) fn serialize(
         derivation.arguments.iter().map(|value| value.as_bytes()),
     )?;
     writer.write_all(b",")?;
-    write_environment(derivation, writer, mask_outputs)?;
+    write_environment(derivation, writer, &form)?;
     writer.write_all(b")")
 }
 
-fn write_outputs(
+fn write_outputs<F: AtermForm>(
     derivation: &Derivation,
     writer: &mut impl Write,
-    mask_outputs: bool,
+    form: &F,
 ) -> io::Result<()> {
     writer.write_all(b"[")?;
     for (index, (name, output)) in derivation.outputs.iter().enumerate() {
@@ -51,84 +90,38 @@ fn write_outputs(
         writer.write_all(b"(")?;
         write_unquoted(writer, name.as_bytes())?;
         writer.write_all(b",")?;
-        match output {
-            Output::InputAddressed { path } => {
-                if mask_outputs {
-                    write_unquoted(writer, b"")?;
-                } else {
-                    write_unquoted(writer, path.to_absolute_path().as_bytes())?;
-                }
-                writer.write_all(b",\"\",\"\"")?;
-            }
-            Output::Fixed { ca } => {
-                if mask_outputs {
-                    write_unquoted(writer, b"")?;
-                } else {
-                    let path = output
-                        .path(&derivation.name, name)
-                        .expect("validated fixed output path")
-                        .expect("fixed outputs have paths");
-                    write_unquoted(writer, path.to_absolute_path().as_bytes())?;
-                }
-                writer.write_all(b",")?;
-                let (method, hash) = fixed_parts(ca);
-                write_unquoted(writer, method.as_bytes())?;
-                writer.write_all(b",")?;
-                write_unquoted_hex(writer, hash.digest_as_bytes())?;
-            }
-            Output::Floating {
-                method,
-                hash_algorithm,
-            } => {
-                write_unquoted(writer, b"")?;
-                writer.write_all(b",")?;
-                write_method_algorithm(writer, *method, *hash_algorithm)?;
-                writer.write_all(b",\"\"")?;
-            }
-            Output::Deferred => writer.write_all(b"\"\",\"\",\"\"")?,
-            Output::Impure {
-                method,
-                hash_algorithm,
-            } => {
-                write_unquoted(writer, b"")?;
-                writer.write_all(b",")?;
-                write_method_algorithm(writer, *method, *hash_algorithm)?;
-                writer.write_all(b",\"impure\"")?;
-            }
-        }
+        form.write_output(derivation, writer, name, output)?;
         writer.write_all(b")")?;
     }
     writer.write_all(b"]")
 }
 
-fn write_inputs(
-    derivation: &Derivation,
-    writer: &mut impl Write,
-    actual_inputs: Option<&BTreeMap<[u8; 32], BTreeSet<String>>>,
-) -> io::Result<()> {
+fn write_full_inputs(derivation: &Derivation, writer: &mut impl Write) -> io::Result<()> {
     writer.write_all(b"[")?;
-    if let Some(actual_inputs) = actual_inputs {
-        for (index, (hash, outputs)) in actual_inputs.iter().enumerate() {
-            if index != 0 {
-                writer.write_all(b",")?;
-            }
-            writer.write_all(b"(")?;
-            write_unquoted_hex(writer, hash)?;
+    for (index, (path, input)) in derivation.input_derivations.iter().enumerate() {
+        if index != 0 {
             writer.write_all(b",")?;
-            write_unquoted_string_list(writer, outputs.iter().map(|value| value.as_bytes()))?;
-            writer.write_all(b")")?;
         }
-    } else {
-        for (index, (path, input)) in derivation.input_derivations.iter().enumerate() {
-            if index != 0 {
-                writer.write_all(b",")?;
-            }
-            writer.write_all(b"(")?;
-            write_unquoted(writer, path.to_absolute_path().as_bytes())?;
+        writer.write_all(b"(")?;
+        write_unquoted(writer, path.to_absolute_path().as_bytes())?;
+        writer.write_all(b",")?;
+        write_input_derivation(writer, input)?;
+        writer.write_all(b")")?;
+    }
+    writer.write_all(b"]")
+}
+
+fn write_modulo_inputs(inputs: &HashModuloInputs, writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b"[")?;
+    for (index, (hash, outputs)) in inputs.iter().enumerate() {
+        if index != 0 {
             writer.write_all(b",")?;
-            write_input_derivation(writer, input)?;
-            writer.write_all(b")")?;
         }
+        writer.write_all(b"(")?;
+        write_unquoted_hex(writer, hash.as_bytes())?;
+        writer.write_all(b",")?;
+        write_unquoted_string_list(writer, outputs.iter().map(|value| value.as_bytes()))?;
+        writer.write_all(b")")?;
     }
     writer.write_all(b"]")
 }
@@ -171,10 +164,10 @@ fn write_store_paths<'a>(
     writer.write_all(b"]")
 }
 
-fn write_environment(
+fn write_environment<F: AtermForm>(
     derivation: &Derivation,
     writer: &mut impl Write,
-    mask_outputs: bool,
+    form: &F,
 ) -> io::Result<()> {
     writer.write_all(b"[")?;
     let mut first = true;
@@ -188,12 +181,12 @@ fn write_environment(
                     &mut first,
                     "__json",
                     attrs.canonical_json(),
-                    mask_outputs,
+                    form,
                 )?;
             }
             wrote_structured_attrs = true;
         }
-        write_environment_entry(derivation, writer, &mut first, key, value, mask_outputs)?;
+        write_environment_entry(derivation, writer, &mut first, key, value, form)?;
     }
     if !wrote_structured_attrs && let Some(attrs) = derivation.structured_attrs.as_ref() {
         write_environment_entry(
@@ -202,19 +195,19 @@ fn write_environment(
             &mut first,
             "__json",
             attrs.canonical_json(),
-            mask_outputs,
+            form,
         )?;
     }
     writer.write_all(b"]")
 }
 
-fn write_environment_entry(
+fn write_environment_entry<F: AtermForm>(
     derivation: &Derivation,
     writer: &mut impl Write,
     first: &mut bool,
     key: &str,
     value: &[u8],
-    mask_outputs: bool,
+    form: &F,
 ) -> io::Result<()> {
     if !*first {
         writer.write_all(b",")?;
@@ -223,12 +216,142 @@ fn write_environment_entry(
     writer.write_all(b"(")?;
     write_escaped(writer, key.as_bytes())?;
     writer.write_all(b",")?;
-    if mask_outputs && derivation.outputs.contains_key(key) {
-        write_escaped(writer, b"")?;
-    } else {
-        write_escaped(writer, value)?;
-    }
+    write_escaped(writer, form.environment_value(derivation, key, value))?;
     writer.write_all(b")")
+}
+
+impl AtermForm for FullAterm {
+    fn uses_dynamic_wrapper(&self, derivation: &Derivation) -> bool {
+        derivation
+            .input_derivations
+            .values()
+            .any(InputDerivation::is_dynamic)
+    }
+
+    fn write_output(
+        &self,
+        derivation: &Derivation,
+        writer: &mut impl Write,
+        name: &str,
+        output: &Output,
+    ) -> io::Result<()> {
+        match output {
+            Output::InputAddressed { path } => {
+                write_unquoted(writer, path.to_absolute_path().as_bytes())?;
+                writer.write_all(b",\"\",\"\"")
+            }
+            Output::Fixed { ca } => {
+                let path = output
+                    .path(&derivation.name, name)
+                    .expect("validated fixed output path")
+                    .expect("fixed outputs have paths");
+                write_unquoted(writer, path.to_absolute_path().as_bytes())?;
+                writer.write_all(b",")?;
+                let (method, hash) = fixed_parts(ca);
+                write_unquoted(writer, method.as_bytes())?;
+                writer.write_all(b",")?;
+                write_unquoted_hex(writer, hash.digest_as_bytes())
+            }
+            Output::Floating {
+                method,
+                hash_algorithm,
+            } => {
+                write_unquoted(writer, b"")?;
+                writer.write_all(b",")?;
+                write_method_algorithm(writer, *method, *hash_algorithm)?;
+                writer.write_all(b",\"\"")
+            }
+            Output::Deferred => writer.write_all(b"\"\",\"\",\"\""),
+            Output::Impure {
+                method,
+                hash_algorithm,
+            } => {
+                write_unquoted(writer, b"")?;
+                writer.write_all(b",")?;
+                write_method_algorithm(writer, *method, *hash_algorithm)?;
+                writer.write_all(b",\"impure\"")
+            }
+        }
+    }
+
+    fn write_inputs(&self, derivation: &Derivation, writer: &mut impl Write) -> io::Result<()> {
+        write_full_inputs(derivation, writer)
+    }
+
+    fn environment_value<'a>(
+        &self,
+        _derivation: &Derivation,
+        _key: &str,
+        value: &'a [u8],
+    ) -> &'a [u8] {
+        value
+    }
+}
+
+impl AtermForm for InputModuloAterm<'_> {
+    fn uses_dynamic_wrapper(&self, _derivation: &Derivation) -> bool {
+        false
+    }
+
+    fn write_output(
+        &self,
+        _derivation: &Derivation,
+        writer: &mut impl Write,
+        _name: &str,
+        output: &Output,
+    ) -> io::Result<()> {
+        let Output::InputAddressed { path } = output else {
+            unreachable!("input modulo accepts only input-addressed outputs")
+        };
+        write_unquoted(writer, path.to_absolute_path().as_bytes())?;
+        writer.write_all(b",\"\",\"\"")
+    }
+
+    fn write_inputs(&self, _derivation: &Derivation, writer: &mut impl Write) -> io::Result<()> {
+        write_modulo_inputs(self.0, writer)
+    }
+
+    fn environment_value<'a>(
+        &self,
+        _derivation: &Derivation,
+        _key: &str,
+        value: &'a [u8],
+    ) -> &'a [u8] {
+        value
+    }
+}
+
+impl AtermForm for OutputModuloAterm<'_> {
+    fn uses_dynamic_wrapper(&self, _derivation: &Derivation) -> bool {
+        false
+    }
+
+    fn write_output(
+        &self,
+        _derivation: &Derivation,
+        writer: &mut impl Write,
+        _name: &str,
+        _output: &Output,
+    ) -> io::Result<()> {
+        writer.write_all(b"\"\",\"\",\"\"")
+    }
+
+    fn write_inputs(&self, _derivation: &Derivation, writer: &mut impl Write) -> io::Result<()> {
+        write_modulo_inputs(self.0, writer)
+    }
+
+    fn environment_value<'a>(
+        &self,
+        derivation: &Derivation,
+        key: &str,
+        value: &'a [u8],
+    ) -> &'a [u8] {
+        if derivation.outputs.contains_key(key) {
+            b""
+        } else {
+            value
+        }
+    }
 }
 
 fn write_string_list<'a>(

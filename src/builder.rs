@@ -140,40 +140,46 @@ impl DerivationBuilder {
         let mut derivation = self.into_derivation();
         if derivation.needs_input_hashes_for_output_paths()? {
             return Err(Error::InvalidDerivation(
-                "building an input-addressed derivation with inputs requires input derivation modulo hashes"
+                "resolving derivation output paths with inputs requires input derivation modulo hashes"
                     .to_owned(),
             ));
         }
-        match derivation.try_fill_output_paths(|_| -> Result<_, std::convert::Infallible> {
-            unreachable!("a derivation without input-dependent paths cannot request an input hash")
-        }) {
+        match derivation.try_fill_output_paths(
+            |_| -> Result<crate::InputDerivationHash, std::convert::Infallible> {
+                unreachable!(
+                    "a derivation without input-dependent paths cannot request an input hash"
+                )
+            },
+        ) {
             Ok(()) => Ok(ValidatedDerivation(derivation)),
-            Err(crate::HashDerivationError::Derivation(error)) => Err(error),
-            Err(crate::HashDerivationError::Resolve { error, .. }) => match error {},
+            Err(crate::InputResolutionError::Derivation(error)) => Err(error),
+            Err(crate::InputResolutionError::Resolve { error, .. }) => match error {},
         }
     }
 
     /// Validate and finish construction using input derivation modulo hashes.
-    pub fn build_with_input_hashes<F>(self, mut resolve: F) -> Result<ValidatedDerivation, Error>
+    pub fn build_with_input_hashes<F, H>(self, mut resolve: F) -> Result<ValidatedDerivation, Error>
     where
-        F: FnMut(&StorePath) -> [u8; 32],
+        F: FnMut(&StorePath) -> H,
+        H: Into<crate::InputDerivationHash>,
     {
-        match self
-            .try_build_with_input_hashes(|path| Ok::<_, std::convert::Infallible>(resolve(path)))
-        {
+        match self.try_build_with_input_hashes(|path| {
+            Ok::<_, std::convert::Infallible>(resolve(path).into())
+        }) {
             Ok(derivation) => Ok(derivation),
-            Err(crate::HashDerivationError::Derivation(error)) => Err(error),
-            Err(crate::HashDerivationError::Resolve { error, .. }) => match error {},
+            Err(crate::InputResolutionError::Derivation(error)) => Err(error),
+            Err(crate::InputResolutionError::Resolve { error, .. }) => match error {},
         }
     }
 
     /// Fallible form of [`Self::build_with_input_hashes`].
-    pub fn try_build_with_input_hashes<F, E>(
+    pub fn try_build_with_input_hashes<F, E, H>(
         self,
         resolve: F,
-    ) -> Result<ValidatedDerivation, crate::HashDerivationError<E>>
+    ) -> Result<ValidatedDerivation, crate::InputResolutionError<E>>
     where
-        F: FnMut(&StorePath) -> Result<[u8; 32], E>,
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<crate::InputDerivationHash>,
     {
         let mut derivation = self.into_derivation();
         derivation.try_fill_output_paths(resolve)?;
@@ -217,36 +223,39 @@ impl ValidatedDerivation {
     }
 
     /// Parse and validate using input derivation modulo hashes.
-    pub fn from_aterm_bytes_with_input_hashes<F>(
+    pub fn from_aterm_bytes_with_input_hashes<F, H>(
         bytes: &[u8],
         name: &str,
         resolve: F,
     ) -> Result<Self, Error>
     where
-        F: FnMut(&StorePath) -> [u8; 32],
+        F: FnMut(&StorePath) -> H,
+        H: Into<crate::InputDerivationHash>,
     {
         Derivation::from_aterm_bytes(bytes, name)?.into_validated_with_input_hashes(resolve)
     }
 
     /// Fallible form of [`Self::from_aterm_bytes_with_input_hashes`].
-    pub fn try_from_aterm_bytes_with_input_hashes<F, E>(
+    pub fn try_from_aterm_bytes_with_input_hashes<F, E, H>(
         bytes: &[u8],
         name: &str,
         resolve: F,
-    ) -> Result<Self, crate::HashDerivationError<E>>
+    ) -> Result<Self, crate::InputResolutionError<E>>
     where
-        F: FnMut(&StorePath) -> Result<[u8; 32], E>,
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<crate::InputDerivationHash>,
     {
         let derivation = Derivation::from_aterm_bytes(bytes, name)?;
         Self::try_from_with_input_hashes(derivation, resolve)
     }
 
-    pub(crate) fn try_from_with_input_hashes<F, E>(
+    pub(crate) fn try_from_with_input_hashes<F, E, H>(
         derivation: Derivation,
         resolve: F,
-    ) -> Result<Self, crate::HashDerivationError<E>>
+    ) -> Result<Self, crate::InputResolutionError<E>>
     where
-        F: FnMut(&StorePath) -> Result<[u8; 32], E>,
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<crate::InputDerivationHash>,
     {
         derivation.try_validate_with_input_hashes(resolve)?;
         Ok(Self(derivation))

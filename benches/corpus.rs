@@ -101,12 +101,16 @@ fn main() {
             black_box(derivation.to_aterm_bytes());
         });
         if fixture.hashable {
-            report(&format!("masked hash {}", fixture.label), size, || {
-                black_box(
-                    derivation
-                        .hash_derivation_modulo(true, |_| [0x42; 32])
-                        .unwrap(),
-                );
+            report(&format!("modulo hash {}", fixture.label), size, || {
+                if derivation.is_fixed_output().unwrap() {
+                    black_box(
+                        derivation
+                            .hash_input_derivation_modulo(|_| [0x42; 32])
+                            .unwrap(),
+                    );
+                } else {
+                    black_box(derivation.hash_output_path_modulo(|_| [0x42; 32]).unwrap());
+                }
             });
         }
     }

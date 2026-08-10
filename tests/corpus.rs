@@ -51,9 +51,7 @@ fn nix_generated_many_inputs_round_trip() {
 
     derivation.validate().unwrap();
     assert_eq!(derivation.input_sources().len(), 128);
-    derivation
-        .hash_derivation_modulo(true, |_| [0x42; 32])
-        .unwrap();
+    derivation.hash_output_path_modulo(|_| [0x42; 32]).unwrap();
 }
 
 #[test]
@@ -66,7 +64,9 @@ fn nix_generated_fixed_output_round_trips_and_hashes() {
     derivation.validate().unwrap();
     assert!(derivation.is_fixed_output().unwrap());
     derivation
-        .hash_derivation_modulo(true, |_| panic!("fixed output has no input derivations"))
+        .hash_input_derivation_modulo(|_| -> [u8; 32] {
+            panic!("fixed output has no input derivations")
+        })
         .unwrap();
 }
 

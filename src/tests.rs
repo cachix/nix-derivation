@@ -2,11 +2,11 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    CAHash, ContentAddressMethod, Derivation, Error, HashAlgorithm, NixHash, Output,
+    CAHash, ContentAddressMethod, Derivation, DerivationModuloHash, Error, HashAlgorithm,
+    InputDerivationHash, NixHash, Output, OutputPathHash,
     store_path::{self, StorePath},
     write,
 };
-use sha2::{Digest as _, Sha256};
 
 const PATH: &str = "/nix/store/00000000000000000000000000000000-example";
 
@@ -80,12 +80,12 @@ fn fixed_git_outputs_round_trip_and_hash() {
     assert!(derivation.is_fixed_output().unwrap());
     assert_eq!(
         derivation
-            .hash_derivation_modulo(false, |_| unreachable!())
+            .hash_input_derivation_modulo(|_| -> [u8; 32] { unreachable!() })
             .unwrap(),
-        [
+        InputDerivationHash::fixed_output([
             132, 204, 128, 229, 240, 164, 219, 206, 53, 1, 70, 167, 89, 75, 229, 226, 115, 21, 230,
             102, 250, 15, 32, 16, 104, 151, 253, 113, 62, 183, 11, 85,
-        ]
+        ])
     );
 }
 
@@ -154,7 +154,7 @@ fn masked_serialization_clears_output_path_and_environment_value() {
     );
     let derivation = Derivation::from_aterm_bytes(&bytes, "example").unwrap();
     let mut masked = Vec::new();
-    write::serialize(&derivation, &mut masked, true, Some(&BTreeMap::new())).unwrap();
+    write::serialize_output_modulo(&derivation, &mut masked, &BTreeMap::new()).unwrap();
     assert_eq!(
         masked,
         aterm(
@@ -174,9 +174,12 @@ fn actual_input_hash_collisions_union_output_names() {
     let derivation = Derivation::from_aterm_bytes(bytes.as_bytes(), "example").unwrap();
     let hash = [0x12; 32];
     let mut actual = BTreeMap::new();
-    actual.insert(hash, BTreeSet::from(["dev".to_owned(), "out".to_owned()]));
+    actual.insert(
+        DerivationModuloHash::new(hash),
+        BTreeSet::from(["dev".to_owned(), "out".to_owned()]),
+    );
     let mut serialized = Vec::new();
-    write::serialize(&derivation, &mut serialized, false, Some(&actual)).unwrap();
+    write::serialize_input_modulo(&derivation, &mut serialized, &actual).unwrap();
     assert!(
         String::from_utf8(serialized)
             .unwrap()
@@ -185,25 +188,27 @@ fn actual_input_hash_collisions_union_output_names() {
 }
 
 #[test]
-fn dynamic_only_roots_do_not_add_empty_actual_inputs() {
+fn dynamic_inputs_defer_modulo_hashing_until_resolution() {
     let input_path = "/nix/store/00000000000000000000000000000000-input.drv";
     let bytes = format!(
         "DrvWithVersion(\"xp-dyn-drv\",[(\"out\",\"{PATH}\",\"\",\"\")],[(\"{input_path}\",([],[(\"generated\",[\"out\"])]))],[],\"x86_64-linux\",\"/bin/sh\",[],[(\"out\",\"{PATH}\")])"
     );
-    // Keep the expected term explicit: Nix retains the versioned wrapper but
-    // serializes no actualInputs entry for a root with no direct outputs.
-    let expected = "DrvWithVersion(\"xp-dyn-drv\",[(\"out\",\"\",\"\",\"\")],[],[],\"x86_64-linux\",\"/bin/sh\",[],[(\"out\",\"\")])";
     let derivation = Derivation::from_aterm_bytes(bytes.as_bytes(), "example").unwrap();
     let calls = Cell::new(0);
     let actual = derivation
-        .hash_derivation_modulo(true, |_| {
+        .hash_output_path_modulo(|_| {
             calls.set(calls.get() + 1);
             [0x42; 32]
         })
         .unwrap();
-    assert_eq!(calls.get(), 1, "Nix still resolves the dynamic-only root");
-    let expected_hash: [u8; 32] = Sha256::digest(expected.as_bytes()).into();
-    assert_eq!(actual, expected_hash);
+    assert_eq!(calls.get(), 0);
+    assert_eq!(actual, OutputPathHash::Deferred);
+    assert_eq!(
+        derivation
+            .hash_input_derivation_modulo(|_| [0x42; 32])
+            .unwrap(),
+        InputDerivationHash::Deferred
+    );
 }
 
 #[test]
@@ -215,11 +220,11 @@ fn fallible_hash_resolver_reports_the_input_path() {
     let derivation = Derivation::from_aterm_bytes(bytes.as_bytes(), "example").unwrap();
 
     let error = derivation
-        .try_hash_derivation_modulo(true, |_| Err("not found"))
+        .try_hash_output_path_modulo(|_| Err::<[u8; 32], _>("not found"))
         .unwrap_err();
     assert_eq!(
         error,
-        crate::HashDerivationError::Resolve {
+        crate::InputResolutionError::Resolve {
             path: StorePath::from_absolute_path(input.as_bytes()).unwrap(),
             error: "not found",
         }
@@ -559,7 +564,7 @@ fn validation_rejects_invalid_output_type_combinations() {
         ));
         assert!(
             derivation
-                .hash_derivation_modulo(false, |_| [0; 32])
+                .hash_input_derivation_modulo(|_| [0; 32])
                 .is_err()
         );
     }
@@ -602,8 +607,12 @@ fn validation_checks_nix_derived_output_paths_and_environment() {
     );
     let draft = Derivation::from_aterm_bytes(draft.as_bytes(), "with-input").unwrap();
     let input_hash = [0x42; 32];
-    let modulo = draft.hash_derivation_modulo(true, |_| input_hash).unwrap();
-    let expected = store_path::build_output_path(&modulo, "out", "with-input").unwrap();
+    let modulo = draft
+        .hash_output_path_modulo(|_| input_hash)
+        .unwrap()
+        .into_ready()
+        .unwrap();
+    let expected = store_path::build_output_path(modulo.as_bytes(), "out", "with-input").unwrap();
     let expected = expected.to_absolute_path();
     let valid_with_input = format!(
         "Derive([(\"out\",\"{expected}\",\"\",\"\")],[(\"{input_path}\",[\"out\"])],[],\"x86_64-linux\",\"/bin/sh\",[\"-c\"],[(\"out\",\"{expected}\")])"
