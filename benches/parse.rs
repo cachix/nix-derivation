@@ -95,10 +95,10 @@ fn main() {
         report(&format!("serialize {label}"), size, || {
             black_box(derivation.to_aterm_bytes());
         });
-        report(&format!("masked hash {label}"), size, || {
+        report(&format!("output-path hash {label}"), size, || {
             black_box(
                 derivation
-                    .hash_derivation_modulo(true, |_| unreachable!())
+                    .hash_output_path_modulo(|_| -> [u8; 32] { unreachable!() })
                     .unwrap(),
             );
         });

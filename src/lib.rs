@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io;
 
 use sha2::{Digest as _, Sha256};
@@ -50,13 +51,153 @@ pub enum Error {
     InvalidDerivation(String),
 }
 
-/// Failure while hashing a derivation with a fallible input resolver.
+/// Failure while resolving an input during derivation hashing or validation.
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum HashDerivationError<E> {
+pub enum InputResolutionError<E> {
     #[error(transparent)]
     Derivation(#[from] Error),
     #[error("failed to resolve input derivation {path}: {error}")]
     Resolve { path: StorePath, error: E },
+}
+
+/// A SHA-256 digest used by Nix's derivation-modulo hashing algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivationModuloHash([u8; 32]);
+
+impl DerivationModuloHash {
+    #[must_use]
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl From<[u8; 32]> for DerivationModuloHash {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self::new(bytes)
+    }
+}
+
+impl From<DerivationModuloHash> for [u8; 32] {
+    fn from(hash: DerivationModuloHash) -> Self {
+        hash.into_bytes()
+    }
+}
+
+impl AsRef<[u8; 32]> for DerivationModuloHash {
+    fn as_ref(&self) -> &[u8; 32] {
+        self.as_bytes()
+    }
+}
+
+impl fmt::Display for DerivationModuloHash {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The identity of a derivation when it is used as an input.
+///
+/// Input-addressed derivations have a regular hash, fixed-output derivations
+/// have a content-derived hash, and derivations whose inputs or outputs have
+/// not been resolved yet are deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputDerivationHash {
+    Regular(DerivationModuloHash),
+    FixedOutput(DerivationModuloHash),
+    Deferred,
+}
+
+impl From<[u8; 32]> for InputDerivationHash {
+    fn from(hash: [u8; 32]) -> Self {
+        Self::regular(hash)
+    }
+}
+
+impl From<DerivationModuloHash> for InputDerivationHash {
+    fn from(hash: DerivationModuloHash) -> Self {
+        Self::Regular(hash)
+    }
+}
+
+impl InputDerivationHash {
+    #[must_use]
+    pub fn regular(hash: impl Into<DerivationModuloHash>) -> Self {
+        Self::Regular(hash.into())
+    }
+
+    #[must_use]
+    pub fn fixed_output(hash: impl Into<DerivationModuloHash>) -> Self {
+        Self::FixedOutput(hash.into())
+    }
+
+    #[must_use]
+    pub const fn regular_hash(&self) -> Option<&DerivationModuloHash> {
+        match self {
+            Self::Regular(hash) => Some(hash),
+            Self::FixedOutput(_) | Self::Deferred => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn fixed_output_hash(&self) -> Option<&DerivationModuloHash> {
+        match self {
+            Self::FixedOutput(hash) => Some(hash),
+            Self::Regular(_) | Self::Deferred => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_deferred(&self) -> bool {
+        matches!(self, Self::Deferred)
+    }
+}
+
+/// State of the hash used to construct input-addressed output paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputPathHash {
+    Ready(DerivationModuloHash),
+    Deferred,
+}
+
+impl OutputPathHash {
+    #[must_use]
+    pub fn ready(hash: impl Into<DerivationModuloHash>) -> Self {
+        Self::Ready(hash.into())
+    }
+
+    #[must_use]
+    pub const fn as_ready(&self) -> Option<&DerivationModuloHash> {
+        match self {
+            Self::Ready(hash) => Some(hash),
+            Self::Deferred => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn into_ready(self) -> Option<DerivationModuloHash> {
+        match self {
+            Self::Ready(hash) => Some(hash),
+            Self::Deferred => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_deferred(&self) -> bool {
+        matches!(self, Self::Deferred)
+    }
 }
 
 /// Hash algorithms understood by Nix derivation output declarations.
@@ -379,29 +520,31 @@ impl Derivation {
     /// Nix needs store access to validate input-addressed output paths when a
     /// derivation has input derivations. This variant supplies the equivalent
     /// information without coupling the crate to a store implementation.
-    pub fn into_validated_with_input_hashes<F>(
+    pub fn into_validated_with_input_hashes<F, H>(
         self,
         mut resolve: F,
     ) -> Result<ValidatedDerivation, Error>
     where
-        F: FnMut(&StorePath) -> [u8; 32],
+        F: FnMut(&StorePath) -> H,
+        H: Into<InputDerivationHash>,
     {
         match self.try_into_validated_with_input_hashes(|path| {
-            Ok::<_, std::convert::Infallible>(resolve(path))
+            Ok::<_, std::convert::Infallible>(resolve(path).into())
         }) {
             Ok(derivation) => Ok(derivation),
-            Err(HashDerivationError::Derivation(error)) => Err(error),
-            Err(HashDerivationError::Resolve { error, .. }) => match error {},
+            Err(InputResolutionError::Derivation(error)) => Err(error),
+            Err(InputResolutionError::Resolve { error, .. }) => match error {},
         }
     }
 
     /// Fallible form of [`Self::into_validated_with_input_hashes`].
-    pub fn try_into_validated_with_input_hashes<F, E>(
+    pub fn try_into_validated_with_input_hashes<F, E, H>(
         self,
         resolve: F,
-    ) -> Result<ValidatedDerivation, HashDerivationError<E>>
+    ) -> Result<ValidatedDerivation, InputResolutionError<E>>
     where
-        F: FnMut(&StorePath) -> Result<[u8; 32], E>,
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<InputDerivationHash>,
     {
         ValidatedDerivation::try_from_with_input_hashes(self, resolve)
     }
@@ -419,7 +562,7 @@ impl Derivation {
 
     /// Write Nix's canonical unmasked ATerm representation.
     pub fn write_aterm(&self, writer: &mut impl io::Write) -> io::Result<()> {
-        write::serialize(self, writer, false, None)
+        write::serialize(self, writer)
     }
 
     /// Serialize using Nix's canonical unmasked representation.
@@ -459,87 +602,158 @@ impl Derivation {
             .collect()
     }
 
-    /// Compute Nix's derivation hash modulo its input derivations.
-    ///
-    /// Input hashes are always the unmasked hashes of those inputs. For the
-    /// current derivation, `mask_outputs` additionally clears output paths and
-    /// environment entries whose keys name outputs.
-    pub fn hash_derivation_modulo<F>(
+    /// Compute this derivation's identity when used as an input derivation.
+    pub fn hash_input_derivation_modulo<F, H>(
         &self,
-        mask_outputs: bool,
         mut resolve: F,
-    ) -> Result<[u8; 32], Error>
+    ) -> Result<InputDerivationHash, Error>
     where
-        F: FnMut(&StorePath) -> [u8; 32],
+        F: FnMut(&StorePath) -> H,
+        H: Into<InputDerivationHash>,
     {
-        match self.try_hash_derivation_modulo(mask_outputs, |path| {
-            Ok::<_, std::convert::Infallible>(resolve(path))
+        match self.try_hash_input_derivation_modulo(|path| {
+            Ok::<_, std::convert::Infallible>(resolve(path).into())
         }) {
             Ok(hash) => Ok(hash),
-            Err(HashDerivationError::Derivation(error)) => Err(error),
-            Err(HashDerivationError::Resolve { error, .. }) => match error {},
+            Err(InputResolutionError::Derivation(error)) => Err(error),
+            Err(InputResolutionError::Resolve { error, .. }) => match error {},
         }
     }
 
-    /// Compute Nix's derivation hash while allowing input lookup to fail.
-    ///
-    /// This is the natural entry point for stores and graph evaluators: a
-    /// missing input is returned with its [`StorePath`] instead of forcing the
-    /// resolver to panic or maintain a separate preflight pass.
-    pub fn try_hash_derivation_modulo<F, E>(
+    /// Fallible form of [`Self::hash_input_derivation_modulo`].
+    pub fn try_hash_input_derivation_modulo<F, E, H>(
         &self,
-        mask_outputs: bool,
         mut resolve: F,
-    ) -> Result<[u8; 32], HashDerivationError<E>>
+    ) -> Result<InputDerivationHash, InputResolutionError<E>>
     where
-        F: FnMut(&StorePath) -> Result<[u8; 32], E>,
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<InputDerivationHash>,
     {
-        if self.is_fixed_output()? {
-            let Some((output_name, Output::Fixed { ca })) = self.outputs.first_key_value() else {
-                unreachable!("is_fixed_output checked the output variant")
-            };
-            if self.outputs.len() != 1 || output_name != "out" {
-                return Err(Error::InvalidFixedOutputs {
-                    name: self.name.clone(),
-                    outputs: self.outputs.len(),
-                }
-                .into());
+        match self.output_type()? {
+            OutputType::Fixed => {
+                let output = self
+                    .outputs
+                    .get("out")
+                    .expect("output_type checked the fixed output name");
+                let Output::Fixed { ca } = output else {
+                    unreachable!("output_type checked fixed outputs")
+                };
+                let path = output
+                    .path(&self.name, "out")?
+                    .expect("fixed output has a path");
+                return Ok(InputDerivationHash::fixed_output(fixed_output_hash(
+                    ca, &path,
+                )));
             }
-            let path = self
-                .outputs
-                .get(output_name)
-                .expect("output still present")
-                .path(&self.name, output_name)?
-                .expect("fixed output has a path");
-            return Ok(fixed_output_hash(ca, &path));
+            OutputType::InputAddressed => {}
+            OutputType::Floating(_) | OutputType::Deferred | OutputType::Impure => {
+                return Ok(InputDerivationHash::Deferred);
+            }
         }
 
-        // Equal input modulo hashes share one actualInputs entry. Nix unions
-        // their requested output names rather than allowing the later map
-        // entry to overwrite the earlier one.
-        let mut actual_inputs: BTreeMap<[u8; 32], BTreeSet<String>> = BTreeMap::new();
-        for (path, input) in &self.input_derivations {
-            let input_hash = resolve(path).map_err(|error| HashDerivationError::Resolve {
-                path: path.clone(),
-                error,
-            })?;
-            // Nix inserts an actualInputs entry only while visiting direct
-            // output requests. A dynamic-only root is resolved above, but it
-            // contributes no empty `(hash, [])` entry to this modulo hash.
-            if !input.outputs.is_empty() {
-                actual_inputs
-                    .entry(input_hash)
-                    .or_default()
-                    // Dynamic child nodes are resolved separately and do not
-                    // enter this top-level hash.
-                    .extend(input.outputs.iter().cloned());
-            }
-        }
+        let Some(actual_inputs) = self.try_modulo_inputs(&mut resolve)? else {
+            return Ok(InputDerivationHash::Deferred);
+        };
 
         let mut writer = HashWriter(Sha256::new());
-        write::serialize(self, &mut writer, mask_outputs, Some(&actual_inputs))
+        write::serialize_input_modulo(self, &mut writer, &actual_inputs)
             .expect("hash writer cannot fail");
-        Ok(writer.0.finalize().into())
+        Ok(InputDerivationHash::regular(<[u8; 32]>::from(
+            writer.0.finalize(),
+        )))
+    }
+
+    /// Compute the quotient hash used to construct this derivation's own
+    /// input-addressed output paths.
+    ///
+    /// [`OutputPathHash::Deferred`] means that a dynamic or
+    /// content-addressed input must be resolved first. Other output types do
+    /// not have an input-addressed output hash.
+    pub fn hash_output_path_modulo<F, H>(&self, mut resolve: F) -> Result<OutputPathHash, Error>
+    where
+        F: FnMut(&StorePath) -> H,
+        H: Into<InputDerivationHash>,
+    {
+        match self.try_hash_output_path_modulo(|path| {
+            Ok::<_, std::convert::Infallible>(resolve(path).into())
+        }) {
+            Ok(hash) => Ok(hash),
+            Err(InputResolutionError::Derivation(error)) => Err(error),
+            Err(InputResolutionError::Resolve { error, .. }) => match error {},
+        }
+    }
+
+    /// Fallible form of [`Self::hash_output_path_modulo`].
+    pub fn try_hash_output_path_modulo<F, E, H>(
+        &self,
+        mut resolve: F,
+    ) -> Result<OutputPathHash, InputResolutionError<E>>
+    where
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<InputDerivationHash>,
+    {
+        match self.output_type()? {
+            OutputType::InputAddressed | OutputType::Deferred => {}
+            OutputType::Fixed | OutputType::Floating(_) | OutputType::Impure => {
+                return Err(Error::InvalidDerivation(
+                    "only input-addressed derivations have an output-path modulo hash".to_owned(),
+                )
+                .into());
+            }
+        }
+        let Some(actual_inputs) = self.try_modulo_inputs(&mut resolve)? else {
+            return Ok(OutputPathHash::Deferred);
+        };
+        let mut writer = HashWriter(Sha256::new());
+        write::serialize_output_modulo(self, &mut writer, &actual_inputs)
+            .expect("hash writer cannot fail");
+        Ok(OutputPathHash::ready(<[u8; 32]>::from(writer.0.finalize())))
+    }
+
+    fn try_modulo_inputs<F, E, H>(
+        &self,
+        mut resolve: F,
+    ) -> Result<Option<write::HashModuloInputs>, InputResolutionError<E>>
+    where
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<InputDerivationHash>,
+    {
+        if self
+            .input_derivations
+            .values()
+            .any(InputDerivation::is_dynamic)
+        {
+            return Ok(None);
+        }
+
+        let mut actual_inputs = write::HashModuloInputs::new();
+        for (path, input) in &self.input_derivations {
+            let input_hash = resolve(path)
+                .map_err(|error| InputResolutionError::Resolve {
+                    path: path.clone(),
+                    error,
+                })?
+                .into();
+            match input_hash {
+                InputDerivationHash::Regular(hash) => {
+                    actual_inputs.insert(hash, input.outputs.clone());
+                }
+                InputDerivationHash::FixedOutput(hash) => {
+                    for output in &input.outputs {
+                        if output != "out" {
+                            return Err(Error::InvalidDerivation(format!(
+                                "fixed-output input derivation {} cannot provide requested output {output:?}",
+                                path.to_absolute_path()
+                            ))
+                            .into());
+                        }
+                        actual_inputs.insert(hash, BTreeSet::from(["out".to_owned()]));
+                    }
+                }
+                InputDerivationHash::Deferred => return Ok(None),
+            }
+        }
+        Ok(Some(actual_inputs))
     }
 
     pub fn drv_path(&self) -> Result<StorePath, Error> {
@@ -579,36 +793,42 @@ impl Derivation {
             ));
         }
 
-        match self.try_validate_output_paths(|_| -> Result<_, std::convert::Infallible> {
-            unreachable!("a derivation without input-dependent paths cannot request an input hash")
-        }) {
+        match self.try_validate_output_paths(
+            |_| -> Result<InputDerivationHash, std::convert::Infallible> {
+                unreachable!(
+                    "a derivation without input-dependent paths cannot request an input hash"
+                )
+            },
+        ) {
             Ok(()) => Ok(()),
-            Err(HashDerivationError::Derivation(error)) => Err(error),
-            Err(HashDerivationError::Resolve { error, .. }) => match error {},
+            Err(InputResolutionError::Derivation(error)) => Err(error),
+            Err(InputResolutionError::Resolve { error, .. }) => match error {},
         }
     }
 
     /// Validate output identities using infallibly resolved input hashes.
-    pub fn validate_with_input_hashes<F>(&self, mut resolve: F) -> Result<(), Error>
+    pub fn validate_with_input_hashes<F, H>(&self, mut resolve: F) -> Result<(), Error>
     where
-        F: FnMut(&StorePath) -> [u8; 32],
+        F: FnMut(&StorePath) -> H,
+        H: Into<InputDerivationHash>,
     {
-        match self
-            .try_validate_with_input_hashes(|path| Ok::<_, std::convert::Infallible>(resolve(path)))
-        {
+        match self.try_validate_with_input_hashes(|path| {
+            Ok::<_, std::convert::Infallible>(resolve(path).into())
+        }) {
             Ok(()) => Ok(()),
-            Err(HashDerivationError::Derivation(error)) => Err(error),
-            Err(HashDerivationError::Resolve { error, .. }) => match error {},
+            Err(InputResolutionError::Derivation(error)) => Err(error),
+            Err(InputResolutionError::Resolve { error, .. }) => match error {},
         }
     }
 
     /// Fallible form of [`Self::validate_with_input_hashes`].
-    pub fn try_validate_with_input_hashes<F, E>(
+    pub fn try_validate_with_input_hashes<F, E, H>(
         &self,
         resolve: F,
-    ) -> Result<(), HashDerivationError<E>>
+    ) -> Result<(), InputResolutionError<E>>
     where
-        F: FnMut(&StorePath) -> Result<[u8; 32], E>,
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<InputDerivationHash>,
     {
         self.validate_structure()?;
         self.try_validate_output_paths(resolve)
@@ -662,26 +882,48 @@ impl Derivation {
     }
 
     fn needs_input_hashes_for_output_paths(&self) -> Result<bool, Error> {
-        Ok(matches!(self.output_type()?, OutputType::InputAddressed)
-            && !self.input_derivations.is_empty())
+        Ok(match self.output_type()? {
+            OutputType::InputAddressed => !self.input_derivations.is_empty(),
+            OutputType::Deferred => {
+                !self.input_derivations.is_empty()
+                    && !self
+                        .input_derivations
+                        .values()
+                        .any(InputDerivation::is_dynamic)
+            }
+            OutputType::Fixed | OutputType::Floating(_) | OutputType::Impure => false,
+        })
     }
 
-    fn try_expected_output_paths<F, E>(
+    fn try_expected_output_paths<F, E, H>(
         &self,
         mut resolve: F,
-    ) -> Result<BTreeMap<String, StorePath>, HashDerivationError<E>>
+    ) -> Result<BTreeMap<String, StorePath>, InputResolutionError<E>>
     where
-        F: FnMut(&StorePath) -> Result<[u8; 32], E>,
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<InputDerivationHash>,
     {
         match self.output_type()? {
-            OutputType::InputAddressed => {
-                let hash = self.try_hash_derivation_modulo(true, &mut resolve)?;
+            output_type @ (OutputType::InputAddressed | OutputType::Deferred) => {
+                let hash = match self.try_hash_output_path_modulo(&mut resolve)? {
+                    OutputPathHash::Ready(hash) => hash,
+                    OutputPathHash::Deferred => {
+                        if matches!(output_type, OutputType::Deferred) {
+                            return Ok(BTreeMap::new());
+                        }
+                        return Err(Error::InvalidDerivation(
+                            "input-addressed outputs must be deferred until dynamic or content-addressed inputs are resolved"
+                                .to_owned(),
+                        )
+                        .into());
+                    }
+                };
                 self.outputs
                     .keys()
                     .map(|name| {
                         Ok((
                             name.clone(),
-                            store_path::build_output_path(&hash, name, &self.name)?,
+                            store_path::build_output_path(hash.as_bytes(), name, &self.name)?,
                         ))
                     })
                     .collect::<Result<_, Error>>()
@@ -700,16 +942,20 @@ impl Derivation {
                 })
                 .collect::<Result<_, Error>>()
                 .map_err(Into::into),
-            OutputType::Floating(_) | OutputType::Deferred | OutputType::Impure => {
-                Ok(BTreeMap::new())
-            }
+            OutputType::Floating(_) | OutputType::Impure => Ok(BTreeMap::new()),
         }
     }
 
-    fn try_validate_output_paths<F, E>(&self, resolve: F) -> Result<(), HashDerivationError<E>>
+    fn try_validate_output_paths<F, E, H>(&self, resolve: F) -> Result<(), InputResolutionError<E>>
     where
-        F: FnMut(&StorePath) -> Result<[u8; 32], E>,
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<InputDerivationHash>,
     {
+        if matches!(self.output_type()?, OutputType::Deferred) {
+            // Nix currently accepts deferred outputs that could be filled in,
+            // for compatibility with derivations emitted by older versions.
+            return Ok(());
+        }
         for (name, expected) in self.try_expected_output_paths(resolve)? {
             if let Output::InputAddressed { path } = &self.outputs[&name]
                 && path != &expected
@@ -743,12 +989,16 @@ impl Derivation {
         Ok(())
     }
 
-    fn try_fill_output_paths<F, E>(&mut self, resolve: F) -> Result<(), HashDerivationError<E>>
+    fn try_fill_output_paths<F, E, H>(&mut self, resolve: F) -> Result<(), InputResolutionError<E>>
     where
-        F: FnMut(&StorePath) -> Result<[u8; 32], E>,
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<InputDerivationHash>,
     {
         self.validate_structure()?;
-        if matches!(self.output_type()?, OutputType::InputAddressed) {
+        if matches!(
+            self.output_type()?,
+            OutputType::InputAddressed | OutputType::Deferred
+        ) {
             // Nix constructs input-addressed derivations with an empty env
             // entry for every output before taking the masked modulo hash.
             // The entry itself is identity-bearing even though its value is
@@ -758,12 +1008,19 @@ impl Derivation {
             }
         }
         for (name, path) in self.try_expected_output_paths(resolve)? {
-            if let Output::InputAddressed { path: output_path } = self
+            match self
                 .outputs
                 .get_mut(&name)
                 .expect("expected paths only contain declared outputs")
             {
-                *output_path = path.clone();
+                Output::InputAddressed { path: output_path } => *output_path = path.clone(),
+                output @ Output::Deferred => {
+                    *output = Output::InputAddressed { path: path.clone() };
+                }
+                Output::Fixed { .. } => {}
+                Output::Floating { .. } | Output::Impure { .. } => {
+                    unreachable!("these output types have no expected paths")
+                }
             }
             self.environment
                 .insert(name, path.to_absolute_path().into_bytes());
@@ -930,7 +1187,7 @@ fn validate_input_node(path: &StorePath, input: &InputDerivation) -> Result<(), 
     Ok(())
 }
 
-fn fixed_output_hash(ca: &CAHash, path: &StorePath) -> [u8; 32] {
+fn fixed_output_hash(ca: &CAHash, path: &StorePath) -> DerivationModuloHash {
     let (method_prefix, hash): (&str, NixHash) = match ca {
         CAHash::Flat(hash) => ("", hash.clone()),
         CAHash::Nar(hash) => ("r:", hash.clone()),
@@ -945,7 +1202,7 @@ fn fixed_output_hash(ca: &CAHash, path: &StorePath) -> [u8; 32] {
     update_hex(&mut digest, hash.digest_as_bytes());
     digest.update(b":");
     digest.update(path.to_absolute_path().as_bytes());
-    digest.finalize().into()
+    DerivationModuloHash::new(digest.finalize().into())
 }
 
 fn update_hex(digest: &mut Sha256, bytes: &[u8]) {

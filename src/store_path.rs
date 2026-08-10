@@ -218,14 +218,14 @@ where
 
 /// Construct the path of an input-addressed derivation output.
 pub fn build_output_path(
-    hash_derivation_modulo: &[u8; 32],
+    output_path_modulo: &[u8; 32],
     output_name: &str,
     drv_name: &str,
 ) -> Result<StorePath, Error> {
     let name = output_path_name(drv_name, output_name)?;
     make_store_path(
         &format!("output:{output_name}"),
-        &NixHash::Sha256(*hash_derivation_modulo),
+        &NixHash::Sha256(*output_path_modulo),
         &name,
     )
 }
