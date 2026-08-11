@@ -1,9 +1,10 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::sync::OnceLock;
 
 use memchr::memchr_iter;
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 
 use crate::{Error, StorePath, store_path};
@@ -11,9 +12,9 @@ use crate::{Error, StorePath, store_path};
 /// Validated structured attributes extracted from a derivation's `__json`
 /// transport entry.
 ///
-/// The original JSON bytes are retained for inspection. The typed value tree
-/// is built during validation so every infallible accessor consumes the same
-/// representation that was already accepted.
+/// The original JSON bytes are retained for inspection. Parsing validates the
+/// complete value without materializing it; the typed value tree is built and
+/// recursively sorted on first use.
 #[derive(Debug)]
 pub struct StructuredAttrs {
     raw: Vec<u8>,
@@ -28,10 +29,10 @@ impl StructuredAttrs {
     }
 
     pub(super) fn parse(raw: Vec<u8>) -> Result<Self, Error> {
-        let object = parse_object(&raw)?;
+        validate_object(&raw)?;
         Ok(Self {
             raw,
-            object: OnceLock::from(object),
+            object: OnceLock::new(),
             canonical: OnceLock::new(),
         })
     }
@@ -74,9 +75,7 @@ impl StructuredAttrs {
     }
 
     fn object(&self) -> &Map<String, Value> {
-        self.object
-            .get()
-            .expect("structured attributes are parsed during construction")
+        self.object.get_or_init(|| parse_object(&self.raw))
     }
 }
 
@@ -225,31 +224,146 @@ impl<'a> OutputReplacements<'a> {
     }
 }
 
-fn parse_object(encoded: &[u8]) -> Result<Map<String, Value>, Error> {
-    match serde_json::from_slice::<Value>(encoded) {
-        Ok(Value::Object(object)) => Ok(sort_object(object)),
-        Ok(_) => Err(Error::StructuredAttrs(
-            "the __json value is not an object".to_owned(),
-        )),
-        Err(error) => Err(Error::StructuredAttrs(error.to_string())),
+fn validate_object(encoded: &[u8]) -> Result<(), Error> {
+    let mut deserializer = serde_json::Deserializer::from_slice(encoded);
+    ValidateObject
+        .deserialize(&mut deserializer)
+        .and_then(|()| deserializer.end())
+        .map_err(|error| Error::StructuredAttrs(error.to_string()))
+}
+
+struct ValidateObject;
+
+impl<'de> DeserializeSeed<'de> for ValidateObject {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(self)
     }
 }
 
-fn sort_object(object: Map<String, Value>) -> Map<String, Value> {
-    let sorted: BTreeMap<String, Value> = object
-        .into_iter()
-        .map(|(key, value)| (key, sort_value(value)))
-        .collect();
-    let mut object = Map::new();
-    object.extend(sorted);
+impl<'de> Visitor<'de> for ValidateObject {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_key::<IgnoredAny>()?.is_some() {
+            map.next_value_seed(ValidateValue)?;
+        }
+        Ok(())
+    }
+}
+
+struct ValidateValue;
+
+impl<'de> DeserializeSeed<'de> for ValidateValue {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ValidateValue {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        ValidateValue.deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element_seed(ValidateValue)?.is_some() {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_key::<IgnoredAny>()?.is_some() {
+            map.next_value_seed(ValidateValue)?;
+        }
+        Ok(())
+    }
+}
+
+fn parse_object(encoded: &[u8]) -> Map<String, Value> {
+    match serde_json::from_slice::<Value>(encoded)
+        .expect("structured attributes were validated during construction")
+    {
+        Value::Object(object) => sort_object(object),
+        _ => unreachable!("structured attributes were validated as an object"),
+    }
+}
+
+fn sort_object(mut object: Map<String, Value>) -> Map<String, Value> {
+    for value in object.values_mut() {
+        sort_value(value);
+    }
+    object.sort_keys();
     object
 }
 
-fn sort_value(value: Value) -> Value {
+fn sort_value(value: &mut Value) {
     match value {
-        Value::Array(values) => Value::Array(values.into_iter().map(sort_value).collect()),
-        Value::Object(object) => Value::Object(sort_object(object)),
-        scalar => scalar,
+        Value::Array(values) => values.iter_mut().for_each(sort_value),
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                sort_value(value);
+            }
+            object.sort_keys();
+        }
+        _ => {}
     }
 }
 
@@ -354,7 +468,7 @@ fn write_json_object(
     replacements: Option<&OutputReplacements<'_>>,
     output: &mut Vec<u8>,
 ) {
-    // StructuredAttrs recursively sorts every object during construction, so
+    // StructuredAttrs recursively sorts every materialized object, so
     // iteration is canonical even if serde_json's preserve_order feature is
     // enabled elsewhere in the dependency graph.
     output.push(b'{');

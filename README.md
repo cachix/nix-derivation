@@ -180,25 +180,28 @@ expressions in [`benches/corpus`](benches/corpus/README.md); the dynamic input
 comes from a fixed version of Nix's own test data. Before measuring, every
 benchmark parses each input, serializes it, parses that result, and serializes
 it again. The two serialized results must match exactly. The same cases and
-validation checks also run under `cargo test`.
+validation checks also run under `cargo test`. “Parse + first serialize” uses
+a fresh derivation on every iteration, while “Serialize (warm)” uses the
+checked derivation whose structured-attribute canonicalization cache was
+populated by that setup.
 
 These results were measured on the same machine as the comparison below, with
 each benchmark restricted to one CPU core and run for seven samples:
 
-| Case | Bytes | Parse | Serialize | Hash with outputs hidden |
-| --- | ---: | ---: | ---: | ---: |
-| structured attrs | 4,196 | 17.85 µs | 8.18 µs | 16.86 µs |
-| 128 inputs | 15,707 | 22.94 µs | 43.48 µs | 56.60 µs |
-| fixed output | 514 | 4.07 µs | 3.02 µs | 2.65 µs |
-| escaped strings | 486 | 3.49 µs | 2.50 µs | 3.22 µs |
-| dynamic derivation | 255 | 3.61 µs | 2.35 µs | n/a[^dynamic-hash] |
+| Case | Bytes | Parse | Parse + first serialize | Serialize (warm) | Hash with outputs hidden |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| structured attrs | 4,196 | 26.55 µs | 116.43 µs | 9.60 µs | 22.59 µs |
+| 128 inputs | 15,707 | 27.85 µs | 39.17 µs | 8.60 µs | 26.89 µs |
+| fixed output | 514 | 4.73 µs | 6.21 µs | 3.07 µs | 2.85 µs |
+| escaped strings | 486 | 4.11 µs | 5.00 µs | 2.42 µs | 3.86 µs |
+| dynamic derivation | 255 | 4.07 µs | 4.59 µs | 2.00 µs | n/a[^dynamic-hash] |
 
 [^dynamic-hash]: This Nix test case intentionally has no outputs. It is valid
     parser input but not a build recipe that Nix can hash.
 
 ### Nix, Lix, and Snix comparison
 
-This is a local snapshot from 2026-08-09, not a universal implementation
+This is a local snapshot from 2026-08-10, not a universal implementation
 ranking. The 1,764-byte `hello.drv` and 16,026-byte `firefox.drv` inputs are the
 [actual files][nix-fixtures] used by Nix's own benchmark. The 64 KiB
 stress input is a generated traditional `Derive(...)` ATerm containing many
@@ -206,22 +209,25 @@ stress input is a generated traditional `Derive(...)` ATerm containing many
 serialization before timing: serializing an already serialized value had to
 produce identical bytes.
 
-Lower is better. Each process used a 250 ms warm-up followed by seven samples
-of at least 300 ms each. The complete comparison was run three times, and the
-table reports the median result for each process.
+Lower is better. The table reports thousands of CPU cycles per operation,
+which avoids changes in CPU frequency distorting comparisons between
+processes. Each operation ran for a fixed iteration count under `perf stat`,
+and the table reports the median counter value from three process runs.
 
 | Operation | Case | Bytes | `nix-derivation` | Nix | Lix | Snix |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| parse | Nix hello | 1,764 | **8.17** | 11.62 | 9.42 | n/a[^snix] |
-| parse | Nix Firefox | 16,026 | **27.90** | 157.37 | 37.69 | n/a[^snix] |
-| parse | generated stress | 65,536 | **86.32** | 97.62 | 174.56 | 480.35 |
-| serialize | Nix hello | 1,764 | **5.07** | 5.66 | 8.97 | n/a[^snix] |
-| serialize | Nix Firefox | 16,026 | 23.31 | 64.85 | **19.34** | n/a[^snix] |
-| serialize | generated stress | 65,536 | **70.56** | 121.36 | 141.51 | 121.42 |
+| parse | Nix hello | 1,764 | **25.13** | 32.16 | 39.90 | n/a[^snix] |
+| parse | Nix Firefox | 16,026 | **100.66** | 485.93 | 109.59 | n/a[^snix] |
+| parse | generated stress | 65,536 | **258.76** | 304.75 | 557.76 | 1,578.23 |
+| serialize | Nix hello | 1,764 | **5.01** | 12.47 | 23.73 | n/a[^snix] |
+| serialize | Nix Firefox | 16,026 | **31.59** | 196.27 | 59.47 | n/a[^snix] |
+| serialize | generated stress | 65,536 | **80.89** | 390.00 | 425.09 | 427.72 |
 
-`nix-derivation` leads parsing on both real files and the stress case. Nix
-takes 1.13–5.64x as long and Lix takes 1.15–2.02x as long. Snix takes 5.57x as
-long on the shared stress input.
+`nix-derivation` uses the fewest cycles in every shared case. The closest result
+is Firefox parsing: it uses 8% fewer cycles than Lix while validating the
+derivation's structured JSON; Lix 2.95.2 treats that `__json` value as opaque.
+On the generated stress input, Snix uses 6.1x as many cycles to parse and 5.3x
+as many to serialize.
 
 [^snix]: The Nix files reuse the placeholder digest `aaaa...` for
     distinct store paths. Snix rejects them as duplicate input sources, so no
@@ -234,17 +240,17 @@ and the default system allocator. The Nix and Lix drivers used Clang 21.1.8
 with `-O3` and linked their packaged release libraries. Lix requires assertions
 to remain enabled; the Nix driver used `-DNDEBUG`.
 
-Parse timings include all work performed by each implementation's public parse
-function. In particular, the C++ drivers construct the owned `std::string`
-passed to Nix and Lix on every parse, while the Rust APIs borrow the input byte
-slice. Serialization starts from an already parsed derivation and returns a
-newly allocated byte string. `nix-derivation` builds and validates the structured
-JSON tree during parsing but does not create its canonical bytes until they are
-first used. The first serialization or structured-file request therefore
-includes that one-time cost. Every process was restricted to CPU 0. CPU
-frequency was not fixed, so small differences should not be over-interpreted.
-This comparison covers only the common traditional ATerm subset; it does not
-compare every implementation's supported features.
+Parse measurements include all work performed by each implementation's public
+parse function. In particular, the C++ drivers construct the owned
+`std::string` passed to Nix and Lix on every parse, while the Rust APIs borrow
+the input byte slice. Serialization starts from an already parsed derivation
+and returns a newly allocated byte string. `nix-derivation` fully validates
+structured JSON during parsing without materializing its value tree; the first
+serialization, typed accessor, or structured-file request builds and sorts
+that tree once. The separate corpus benchmark above reports this one-time cost.
+Every process was restricted to the same CPU core. This comparison covers only
+the common traditional ATerm subset; it does not compare every implementation's
+supported features.
 
 [nix-benchmark]: https://github.com/NixOS/nix/blob/2.34.4/src/libstore-tests/derivation-parser-bench.cc
 [nix-fixtures]: https://github.com/NixOS/nix/tree/2.34.4/src/libstore-tests/data/derivation

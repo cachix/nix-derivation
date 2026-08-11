@@ -1,7 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 
-use crate::{CAHash, ContentAddressMethod, Derivation, HashAlgorithm, NixHash, Output, StorePath};
+use memchr::{memchr2, memchr3_iter};
+
+use crate::{
+    CAHash, ContentAddressMethod, Derivation, HashAlgorithm, NixHash, Output, StorePath, nixbase32,
+};
 use crate::{DerivationModuloHash, InputDerivation};
 
 pub(super) type HashModuloInputs = BTreeMap<DerivationModuloHash, BTreeSet<String>>;
@@ -103,7 +107,7 @@ fn write_full_inputs(derivation: &Derivation, writer: &mut impl Write) -> io::Re
             writer.write_all(b",")?;
         }
         writer.write_all(b"(")?;
-        write_unquoted(writer, path.to_absolute_path().as_bytes())?;
+        write_store_path(writer, path)?;
         writer.write_all(b",")?;
         write_input_derivation(writer, input)?;
         writer.write_all(b")")?;
@@ -159,7 +163,7 @@ fn write_store_paths<'a>(
         if index != 0 {
             writer.write_all(b",")?;
         }
-        write_unquoted(writer, path.to_absolute_path().as_bytes())?;
+        write_store_path(writer, path)?;
     }
     writer.write_all(b"]")
 }
@@ -237,7 +241,7 @@ impl AtermForm for FullAterm {
     ) -> io::Result<()> {
         match output {
             Output::InputAddressed { path } => {
-                write_unquoted(writer, path.to_absolute_path().as_bytes())?;
+                write_store_path(writer, path)?;
                 writer.write_all(b",\"\",\"\"")
             }
             Output::Fixed { ca } => {
@@ -245,7 +249,7 @@ impl AtermForm for FullAterm {
                     .path(&derivation.name, name)
                     .expect("validated fixed output path")
                     .expect("fixed outputs have paths");
-                write_unquoted(writer, path.to_absolute_path().as_bytes())?;
+                write_store_path(writer, &path)?;
                 writer.write_all(b",")?;
                 let (method, hash) = fixed_parts(ca);
                 write_unquoted(writer, method.as_bytes())?;
@@ -303,7 +307,7 @@ impl AtermForm for InputModuloAterm<'_> {
         let Output::InputAddressed { path } = output else {
             unreachable!("input modulo accepts only input-addressed outputs")
         };
-        write_unquoted(writer, path.to_absolute_path().as_bytes())?;
+        write_store_path(writer, path)?;
         writer.write_all(b",\"\",\"\"")
     }
 
@@ -384,6 +388,22 @@ fn write_unquoted_string_list<'a>(
 
 fn write_escaped(writer: &mut impl Write, value: &[u8]) -> io::Result<()> {
     writer.write_all(b"\"")?;
+    if memchr2(b'\r', b'\t', value).is_none() {
+        let mut start = 0;
+        for index in memchr3_iter(b'"', b'\\', b'\n', value) {
+            writer.write_all(&value[start..index])?;
+            writer.write_all(match value[index] {
+                b'"' => b"\\\"",
+                b'\\' => b"\\\\",
+                b'\n' => b"\\n",
+                _ => unreachable!("memchr3 returned a different byte"),
+            })?;
+            start = index + 1;
+        }
+        writer.write_all(&value[start..])?;
+        return writer.write_all(b"\"");
+    }
+
     let mut start = 0;
     for (index, byte) in value.iter().copied().enumerate() {
         let escape: Option<&[u8]> = match byte {
@@ -401,6 +421,14 @@ fn write_escaped(writer: &mut impl Write, value: &[u8]) -> io::Result<()> {
         }
     }
     writer.write_all(&value[start..])?;
+    writer.write_all(b"\"")
+}
+
+fn write_store_path(writer: &mut impl Write, path: &StorePath) -> io::Result<()> {
+    writer.write_all(b"\"/nix/store/")?;
+    writer.write_all(&nixbase32::encode_fixed::<32>(path.digest()))?;
+    writer.write_all(b"-")?;
+    writer.write_all(path.name().as_bytes())?;
     writer.write_all(b"\"")
 }
 

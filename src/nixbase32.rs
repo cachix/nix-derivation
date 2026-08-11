@@ -58,6 +58,25 @@ pub fn encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Encode into a caller-selected fixed-width buffer without allocating.
+pub(crate) fn encode_fixed<const N: usize>(bytes: &[u8]) -> [u8; N] {
+    assert_eq!(N, encoded_len(bytes.len()));
+    let mut out = [0; N];
+    for (index, n) in (0..N).rev().enumerate() {
+        let bit = n * 5;
+        let i = bit / 8;
+        let shift = bit % 8;
+        let low = u16::from(bytes[i]) >> shift;
+        let high = if i + 1 < bytes.len() {
+            u16::from(bytes[i + 1]) << (8 - shift)
+        } else {
+            0
+        };
+        out[index] = ALPHABET[((low | high) & 0x1f) as usize];
+    }
+    out
+}
+
 /// Compare equal-width byte strings by their encoded representation without
 /// allocating either encoding.
 pub(crate) fn cmp_encoded(left: &[u8], right: &[u8]) -> Ordering {
@@ -259,6 +278,18 @@ mod tests {
             let encoded = encode(&bytes);
             assert_eq!(decode_fixed::<20>(encoded.as_bytes()), Ok(bytes));
             assert_eq!(decode(encoded.as_bytes()), Ok(bytes.to_vec()));
+        }
+    }
+
+    #[test]
+    fn fixed_width_encode_matches_general_encode() {
+        for seed in 0..64_u8 {
+            let bytes: [u8; 20] =
+                std::array::from_fn(|index| seed.wrapping_add((index as u8).wrapping_mul(31)));
+            assert_eq!(
+                encode_fixed::<32>(&bytes).as_slice(),
+                encode(&bytes).as_bytes()
+            );
         }
     }
 

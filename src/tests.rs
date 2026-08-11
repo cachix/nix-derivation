@@ -136,12 +136,12 @@ fn writer_matches_nix_field_specific_escape_policy() {
         .unwrap()
         .outputs = BTreeSet::from(["slash\\output".to_owned()]);
     derivation.system = "sys\ntem".to_owned();
-    derivation.builder = "builder\\path".to_owned();
+    derivation.builder = "builder\"\\path\nnext".to_owned();
     derivation.arguments = vec!["tab\targument".to_owned()];
 
     let encoded = derivation.to_aterm_bytes();
     let expected = format!(
-        "Derive([(\"quote\"output\",\"{PATH}\",\"\",\"\")],[(\"{input}\",[\"slash\\output\"])],[],\"sys\ntem\",\"builder\\\\path\",[\"tab\\targument\"],[])"
+        "Derive([(\"quote\"output\",\"{PATH}\",\"\",\"\")],[(\"{input}\",[\"slash\\output\"])],[],\"sys\ntem\",\"builder\\\"\\\\path\\nnext\",[\"tab\\targument\"],[])"
     );
     assert_eq!(encoded, expected.as_bytes());
 }
@@ -360,7 +360,7 @@ fn structured_attrs_files_rewrite_many_repeated_placeholders() {
 
 #[test]
 fn invalid_structured_attrs_are_rejected_during_parsing() {
-    for encoded in ["not-json", "[]", r#"{"x":1e400}"#] {
+    for encoded in ["not-json", "[]", r#"{"x":1e400}"#, r#"{"x":1} null"#] {
         let escaped = encoded.replace('"', "\\\"");
         let bytes = aterm(
             &format!("(\"out\",\"{PATH}\",\"\",\"\")"),

@@ -12,6 +12,7 @@ categories = ["parser-implementations", "data-structures"]
 [dependencies]
 base64 = "0.22"
 memchr = "2"
+serde = "1"
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 thiserror = "2"

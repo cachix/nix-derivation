@@ -97,7 +97,16 @@ fn main() {
                 Derivation::from_aterm_bytes(black_box(fixture.bytes), fixture.name).unwrap(),
             );
         });
-        report(&format!("serialize {}", fixture.label), size, || {
+        report(
+            &format!("parse + first serialize {}", fixture.label),
+            size,
+            || {
+                let derivation =
+                    Derivation::from_aterm_bytes(black_box(fixture.bytes), fixture.name).unwrap();
+                black_box(derivation.to_aterm_bytes());
+            },
+        );
+        report(&format!("serialize (warm) {}", fixture.label), size, || {
             black_box(derivation.to_aterm_bytes());
         });
         if fixture.hashable {
