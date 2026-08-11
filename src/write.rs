@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 
@@ -24,6 +25,11 @@ trait AtermForm {
         derivation: &Derivation,
         writer: &mut (impl Write + ?Sized),
     ) -> io::Result<()>;
+    fn structured_json<'a>(
+        &self,
+        derivation: &'a Derivation,
+        attrs: &'a crate::StructuredAttrs,
+    ) -> Cow<'a, [u8]>;
     fn environment_value<'a>(
         &self,
         derivation: &Derivation,
@@ -195,12 +201,13 @@ fn write_environment<F: AtermForm>(
     for (key, value) in &derivation.environment {
         if !wrote_structured_attrs && key.as_str() > "__json" {
             if let Some(attrs) = derivation.structured_attrs.as_ref() {
+                let structured_json = form.structured_json(derivation, attrs);
                 write_environment_entry(
                     derivation,
                     writer,
                     &mut first,
                     "__json",
-                    attrs.canonical_json(),
+                    &structured_json,
                     form,
                 )?;
             }
@@ -209,12 +216,13 @@ fn write_environment<F: AtermForm>(
         write_environment_entry(derivation, writer, &mut first, key, value, form)?;
     }
     if !wrote_structured_attrs && let Some(attrs) = derivation.structured_attrs.as_ref() {
+        let structured_json = form.structured_json(derivation, attrs);
         write_environment_entry(
             derivation,
             writer,
             &mut first,
             "__json",
-            attrs.canonical_json(),
+            &structured_json,
             form,
         )?;
     }
@@ -302,6 +310,17 @@ impl AtermForm for FullAterm {
         write_full_inputs(derivation, writer)
     }
 
+    fn structured_json<'a>(
+        &self,
+        derivation: &'a Derivation,
+        attrs: &'a crate::StructuredAttrs,
+    ) -> Cow<'a, [u8]> {
+        derivation.meta.as_ref().map_or_else(
+            || Cow::Borrowed(attrs.canonical_json()),
+            |meta| Cow::Owned(attrs.canonical_json_with_meta(meta)),
+        )
+    }
+
     fn environment_value<'a>(
         &self,
         _derivation: &Derivation,
@@ -339,6 +358,14 @@ impl AtermForm for InputModuloAterm<'_> {
         write_modulo_inputs(self.0, writer)
     }
 
+    fn structured_json<'a>(
+        &self,
+        _derivation: &'a Derivation,
+        attrs: &'a crate::StructuredAttrs,
+    ) -> Cow<'a, [u8]> {
+        Cow::Borrowed(attrs.canonical_json())
+    }
+
     fn environment_value<'a>(
         &self,
         _derivation: &Derivation,
@@ -370,6 +397,14 @@ impl AtermForm for OutputModuloAterm<'_> {
         writer: &mut (impl Write + ?Sized),
     ) -> io::Result<()> {
         write_modulo_inputs(self.0, writer)
+    }
+
+    fn structured_json<'a>(
+        &self,
+        _derivation: &'a Derivation,
+        attrs: &'a crate::StructuredAttrs,
+    ) -> Cow<'a, [u8]> {
+        Cow::Borrowed(attrs.canonical_json())
     }
 
     fn environment_value<'a>(

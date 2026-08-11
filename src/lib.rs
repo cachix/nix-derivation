@@ -41,7 +41,7 @@ mod write;
 pub use builder::{DerivationBuilder, ValidatedDerivation};
 pub use hash::{CAHash, ContentAddressMethod, HashAlgorithm, NixHash};
 pub use store_path::StorePath;
-pub use structured_attrs::{StructuredAttrs, StructuredAttrsFiles};
+pub use structured_attrs::{DerivationMeta, StructuredAttrs, StructuredAttrsFiles};
 
 #[cfg(test)]
 mod tests;
@@ -498,6 +498,7 @@ pub struct Derivation {
     arguments: Vec<String>,
     environment: BTreeMap<String, Vec<u8>>,
     structured_attrs: Option<structured_attrs::StructuredAttrs>,
+    meta: Option<DerivationMeta>,
     aterm_size_hint: usize,
 }
 
@@ -512,6 +513,7 @@ impl PartialEq for Derivation {
             && self.arguments == other.arguments
             && self.environment == other.environment
             && self.structured_attrs == other.structured_attrs
+            && self.meta == other.meta
     }
 }
 
@@ -898,6 +900,20 @@ impl Derivation {
                 "environment key \"__json\" is reserved for structured attributes".to_owned(),
             ));
         }
+        if let Some(attrs) = &self.structured_attrs {
+            if self.meta.is_some() {
+                attrs.validate_for_meta()?;
+            } else if attrs.get("__meta").is_some() {
+                return Err(Error::InvalidDerivation(
+                    "derivation has __meta but does not opt into derivation-meta with an object and required system feature"
+                        .to_owned(),
+                ));
+            }
+        } else if self.meta.is_some() {
+            return Err(Error::InvalidDerivation(
+                "derivation metadata requires structured attributes".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -1076,6 +1092,12 @@ impl Derivation {
     /// Return parsed structured attributes when the derivation uses `__structuredAttrs`.
     pub fn structured_attrs(&self) -> Option<&StructuredAttrs> {
         self.structured_attrs.as_ref()
+    }
+
+    /// Metadata excluded from derivation-modulo hashing and builder inputs.
+    #[must_use]
+    pub fn meta(&self) -> Option<&DerivationMeta> {
+        self.meta.as_ref()
     }
 
     /// Materialize `.attrs.json` and `.attrs.sh` when this derivation uses
