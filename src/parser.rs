@@ -293,12 +293,9 @@ impl Parser<'_> {
         } else {
             let (method, algorithm_bytes) = ContentAddressMethod::parse_prefix(&method_algo);
             let hash_algorithm =
-                HashAlgorithm::parse(algorithm_bytes).map_err(|error| match error {
-                    Error::Parse { message, .. } => Error::Parse {
-                        offset: self.pos,
-                        message,
-                    },
-                    other => other,
+                HashAlgorithm::parse_bytes(algorithm_bytes).map_err(|error| Error::Parse {
+                    offset: self.pos,
+                    message: error.to_string(),
                 })?;
             if hash == b"impure" {
                 if !path.is_empty() {
@@ -342,16 +339,7 @@ fn fixed_content_address(
         offset: 0,
         message: "fixed output digest is not valid base16".to_owned(),
     })?;
-    Ok(CAHash::from_parts(
-        match method {
-            ContentAddressMethod::Flat => "flat",
-            ContentAddressMethod::Nar => "nar",
-            ContentAddressMethod::Text => "text",
-            ContentAddressMethod::Git => "git",
-        },
-        algorithm.as_str(),
-        &digest,
-    )?)
+    Ok(CAHash::from_parts(method, algorithm, &digest)?)
 }
 
 fn decode_hex(value: &str) -> Option<Vec<u8>> {

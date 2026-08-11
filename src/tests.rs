@@ -8,6 +8,19 @@ use crate::{
     write,
 };
 
+#[test]
+fn output_hash_vocabulary_has_canonical_display_names() {
+    assert_eq!(HashAlgorithm::Sha256.to_string(), "sha256");
+    assert_eq!("sha256".parse(), Ok(HashAlgorithm::Sha256));
+    assert_eq!(ContentAddressMethod::Nar.to_string(), "nar");
+    assert_eq!("nar".parse(), Ok(ContentAddressMethod::Nar));
+    assert_eq!(ContentAddressMethod::Flat.as_str(), "flat");
+
+    let hash = NixHash::Sha256([0; 32]);
+    assert_eq!(hash.algorithm(), HashAlgorithm::Sha256);
+    assert_eq!(CAHash::Nar(hash).method(), ContentAddressMethod::Nar);
+}
+
 const PATH: &str = "/nix/store/00000000000000000000000000000000-example";
 
 fn aterm(output: &str, environment: &str) -> Vec<u8> {
@@ -18,9 +31,14 @@ fn aterm(output: &str, environment: &str) -> Vec<u8> {
 #[test]
 fn parses_and_round_trips_every_modern_output_variant() {
     let fixed_ca = CAHash::Nar(NixHash::Sha256([0; 32]));
-    let fixed_path = store_path::build_ca_path("example", &fixed_ca, std::iter::empty(), false)
-        .unwrap()
-        .to_absolute_path();
+    let fixed_path = store_path::build_ca_path(
+        "example",
+        &fixed_ca,
+        std::iter::empty::<&StorePath>(),
+        false,
+    )
+    .unwrap()
+    .to_absolute_path();
     let cases = [
         (
             format!("(\"out\",\"{PATH}\",\"\",\"\")"),
@@ -63,7 +81,7 @@ fn parses_and_round_trips_every_modern_output_variant() {
 #[test]
 fn fixed_git_outputs_round_trip_and_hash() {
     let ca = CAHash::Git(NixHash::Sha1([0; 20]));
-    let path = store_path::build_ca_path("git-fixed", &ca, std::iter::empty(), false)
+    let path = store_path::build_ca_path("git-fixed", &ca, std::iter::empty::<&StorePath>(), false)
         .unwrap()
         .to_absolute_path();
     assert_eq!(
@@ -612,7 +630,7 @@ fn validation_checks_nix_derived_output_paths_and_environment() {
         .unwrap()
         .into_ready()
         .unwrap();
-    let expected = store_path::build_output_path(modulo.as_bytes(), "out", "with-input").unwrap();
+    let expected = store_path::build_output_path(modulo, "out", "with-input").unwrap();
     let expected = expected.to_absolute_path();
     let valid_with_input = format!(
         "Derive([(\"out\",\"{expected}\",\"\",\"\")],[(\"{input_path}\",[\"out\"])],[],\"x86_64-linux\",\"/bin/sh\",[\"-c\"],[(\"out\",\"{expected}\")])"

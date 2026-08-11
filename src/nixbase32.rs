@@ -20,13 +20,19 @@ const REVERSE: [u8; 256] = reverse_table();
 
 /// An invalid Nix base32 string.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// The encoded length cannot represent a whole number of bytes.
     #[error("invalid nixbase32 length {0}")]
     InvalidLength(usize),
     /// A byte is not part of Nix's lowercase base32 alphabet.
     #[error("invalid nixbase32 byte {byte:#04x} at offset {offset}")]
-    InvalidByte { offset: usize, byte: u8 },
+    InvalidByte {
+        /// Byte offset of the invalid character.
+        offset: usize,
+        /// Invalid encoded byte.
+        byte: u8,
+    },
     /// Bits outside the decoded byte sequence are nonzero.
     #[error("nonzero padding bits in nixbase32 input")]
     NonZeroPadding,

@@ -17,7 +17,7 @@ fn output() -> Output {
 #[test]
 fn builder_produces_canonical_aterm() {
     let derivation = DerivationBuilder::new("example", "x86_64-linux", "/bin/sh")
-        .output("out", output())
+        .input_addressed_output("out")
         .argument("-c")
         .argument("printf built > $out")
         .environment("out", OUTPUT_PATH.as_bytes())
@@ -43,6 +43,15 @@ fn parsed_derivation_can_be_edited_without_cloning() {
         .unwrap()
         .into_derivation();
     let mut builder = original.into_builder();
+    assert_eq!(builder.name(), "example");
+    assert_eq!(builder.system(), "x86_64-linux");
+    assert_eq!(builder.builder(), "/bin/sh");
+    assert_eq!(builder.outputs().len(), 1);
+    assert!(builder.input_derivations().is_empty());
+    assert!(builder.input_sources().is_empty());
+    assert!(builder.arguments().is_empty());
+    assert!(builder.environment_entries().contains_key("out"));
+    assert!(builder.structured_attrs_ref().is_none());
     builder.arguments_mut().push("--verbose".to_owned());
     builder
         .environment_mut()
@@ -171,4 +180,17 @@ fn validated_wrapper_makes_derived_views_infallible() {
         ValidatedDerivation::from_aterm_bytes(&derivation.to_aterm_bytes(), derivation.name())
             .unwrap();
     assert_eq!(reparsed, derivation);
+}
+
+#[test]
+fn serialization_accepts_a_dynamically_dispatched_writer() {
+    let derivation = DerivationBuilder::new("example", "x86_64-linux", "/bin/sh")
+        .output("out", output())
+        .build()
+        .unwrap();
+
+    let mut bytes = Vec::new();
+    let writer: &mut dyn std::io::Write = &mut bytes;
+    derivation.write_aterm(writer).unwrap();
+    assert_eq!(bytes, derivation.to_aterm_bytes());
 }

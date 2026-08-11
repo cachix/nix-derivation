@@ -89,17 +89,13 @@ fn drv_path_is_text_hash_of_its_own_bytes() {
         let bytes = corpus::read_drv(path);
         let drv = parse(path);
 
-        let references: Vec<String> = drv
-            .input_derivations()
-            .keys()
-            .chain(drv.input_sources())
-            .map(StorePath::to_absolute_path)
-            .collect();
-
         let name = format!("{}.drv", corpus::drv_name(path));
-        let computed =
-            store_path::build_text_path(&name, &bytes, references.iter().map(String::as_str))
-                .expect("build_text_path");
+        let computed = store_path::build_text_path(
+            &name,
+            &bytes,
+            drv.input_derivations().keys().chain(drv.input_sources()),
+        )
+        .expect("build_text_path");
 
         assert_eq!(
             computed.to_absolute_path(),
@@ -181,12 +177,12 @@ fn output_paths_match_output_path_modulo() {
                     // A derivation's fixed outputs carry no references and no
                     // self reference (Nix uses `withoutRefs` here), whatever
                     // the hash mode.
-                    store_path::build_ca_path(&name, ca, std::iter::empty(), false)
+                    store_path::build_ca_path(&name, ca, std::iter::empty::<&StorePath>(), false)
                         .expect("build_ca_path")
                 }
                 None => {
                     let hash = output_path_modulo(path, &mut cache);
-                    store_path::build_output_path(hash.as_bytes(), &output_name, &drv_name)
+                    store_path::build_output_path(hash, &output_name, &drv_name)
                         .expect("build_output_path")
                 }
             };

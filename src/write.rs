@@ -15,11 +15,15 @@ trait AtermForm {
     fn write_output(
         &self,
         derivation: &Derivation,
-        writer: &mut impl Write,
+        writer: &mut (impl Write + ?Sized),
         name: &str,
         output: &Output,
     ) -> io::Result<()>;
-    fn write_inputs(&self, derivation: &Derivation, writer: &mut impl Write) -> io::Result<()>;
+    fn write_inputs(
+        &self,
+        derivation: &Derivation,
+        writer: &mut (impl Write + ?Sized),
+    ) -> io::Result<()>;
     fn environment_value<'a>(
         &self,
         derivation: &Derivation,
@@ -32,13 +36,16 @@ struct FullAterm;
 struct InputModuloAterm<'a>(&'a HashModuloInputs);
 struct OutputModuloAterm<'a>(&'a HashModuloInputs);
 
-pub(super) fn serialize(derivation: &Derivation, writer: &mut impl Write) -> io::Result<()> {
+pub(super) fn serialize(
+    derivation: &Derivation,
+    writer: &mut (impl Write + ?Sized),
+) -> io::Result<()> {
     serialize_form(derivation, writer, FullAterm)
 }
 
 pub(super) fn serialize_input_modulo(
     derivation: &Derivation,
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     inputs: &HashModuloInputs,
 ) -> io::Result<()> {
     serialize_form(derivation, writer, InputModuloAterm(inputs))
@@ -46,7 +53,7 @@ pub(super) fn serialize_input_modulo(
 
 pub(super) fn serialize_output_modulo(
     derivation: &Derivation,
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     inputs: &HashModuloInputs,
 ) -> io::Result<()> {
     serialize_form(derivation, writer, OutputModuloAterm(inputs))
@@ -54,7 +61,7 @@ pub(super) fn serialize_output_modulo(
 
 fn serialize_form<F: AtermForm>(
     derivation: &Derivation,
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     form: F,
 ) -> io::Result<()> {
     if form.uses_dynamic_wrapper(derivation) {
@@ -83,7 +90,7 @@ fn serialize_form<F: AtermForm>(
 
 fn write_outputs<F: AtermForm>(
     derivation: &Derivation,
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     form: &F,
 ) -> io::Result<()> {
     writer.write_all(b"[")?;
@@ -100,7 +107,10 @@ fn write_outputs<F: AtermForm>(
     writer.write_all(b"]")
 }
 
-fn write_full_inputs(derivation: &Derivation, writer: &mut impl Write) -> io::Result<()> {
+fn write_full_inputs(
+    derivation: &Derivation,
+    writer: &mut (impl Write + ?Sized),
+) -> io::Result<()> {
     writer.write_all(b"[")?;
     for (index, (path, input)) in derivation.input_derivations.iter().enumerate() {
         if index != 0 {
@@ -115,7 +125,10 @@ fn write_full_inputs(derivation: &Derivation, writer: &mut impl Write) -> io::Re
     writer.write_all(b"]")
 }
 
-fn write_modulo_inputs(inputs: &HashModuloInputs, writer: &mut impl Write) -> io::Result<()> {
+fn write_modulo_inputs(
+    inputs: &HashModuloInputs,
+    writer: &mut (impl Write + ?Sized),
+) -> io::Result<()> {
     writer.write_all(b"[")?;
     for (index, (hash, outputs)) in inputs.iter().enumerate() {
         if index != 0 {
@@ -130,7 +143,10 @@ fn write_modulo_inputs(inputs: &HashModuloInputs, writer: &mut impl Write) -> io
     writer.write_all(b"]")
 }
 
-fn write_input_derivation(writer: &mut impl Write, input: &InputDerivation) -> io::Result<()> {
+fn write_input_derivation(
+    writer: &mut (impl Write + ?Sized),
+    input: &InputDerivation,
+) -> io::Result<()> {
     if input.dynamic_outputs.is_empty() {
         return write_unquoted_string_list(
             writer,
@@ -155,7 +171,7 @@ fn write_input_derivation(writer: &mut impl Write, input: &InputDerivation) -> i
 }
 
 fn write_store_paths<'a>(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     paths: impl Iterator<Item = &'a StorePath>,
 ) -> io::Result<()> {
     writer.write_all(b"[")?;
@@ -170,7 +186,7 @@ fn write_store_paths<'a>(
 
 fn write_environment<F: AtermForm>(
     derivation: &Derivation,
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     form: &F,
 ) -> io::Result<()> {
     writer.write_all(b"[")?;
@@ -207,7 +223,7 @@ fn write_environment<F: AtermForm>(
 
 fn write_environment_entry<F: AtermForm>(
     derivation: &Derivation,
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     first: &mut bool,
     key: &str,
     value: &[u8],
@@ -235,7 +251,7 @@ impl AtermForm for FullAterm {
     fn write_output(
         &self,
         derivation: &Derivation,
-        writer: &mut impl Write,
+        writer: &mut (impl Write + ?Sized),
         name: &str,
         output: &Output,
     ) -> io::Result<()> {
@@ -278,7 +294,11 @@ impl AtermForm for FullAterm {
         }
     }
 
-    fn write_inputs(&self, derivation: &Derivation, writer: &mut impl Write) -> io::Result<()> {
+    fn write_inputs(
+        &self,
+        derivation: &Derivation,
+        writer: &mut (impl Write + ?Sized),
+    ) -> io::Result<()> {
         write_full_inputs(derivation, writer)
     }
 
@@ -300,7 +320,7 @@ impl AtermForm for InputModuloAterm<'_> {
     fn write_output(
         &self,
         _derivation: &Derivation,
-        writer: &mut impl Write,
+        writer: &mut (impl Write + ?Sized),
         _name: &str,
         output: &Output,
     ) -> io::Result<()> {
@@ -311,7 +331,11 @@ impl AtermForm for InputModuloAterm<'_> {
         writer.write_all(b",\"\",\"\"")
     }
 
-    fn write_inputs(&self, _derivation: &Derivation, writer: &mut impl Write) -> io::Result<()> {
+    fn write_inputs(
+        &self,
+        _derivation: &Derivation,
+        writer: &mut (impl Write + ?Sized),
+    ) -> io::Result<()> {
         write_modulo_inputs(self.0, writer)
     }
 
@@ -333,14 +357,18 @@ impl AtermForm for OutputModuloAterm<'_> {
     fn write_output(
         &self,
         _derivation: &Derivation,
-        writer: &mut impl Write,
+        writer: &mut (impl Write + ?Sized),
         _name: &str,
         _output: &Output,
     ) -> io::Result<()> {
         writer.write_all(b"\"\",\"\",\"\"")
     }
 
-    fn write_inputs(&self, _derivation: &Derivation, writer: &mut impl Write) -> io::Result<()> {
+    fn write_inputs(
+        &self,
+        _derivation: &Derivation,
+        writer: &mut (impl Write + ?Sized),
+    ) -> io::Result<()> {
         write_modulo_inputs(self.0, writer)
     }
 
@@ -359,7 +387,7 @@ impl AtermForm for OutputModuloAterm<'_> {
 }
 
 fn write_string_list<'a>(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     values: impl Iterator<Item = &'a [u8]>,
 ) -> io::Result<()> {
     writer.write_all(b"[")?;
@@ -373,7 +401,7 @@ fn write_string_list<'a>(
 }
 
 fn write_unquoted_string_list<'a>(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     values: impl Iterator<Item = &'a [u8]>,
 ) -> io::Result<()> {
     writer.write_all(b"[")?;
@@ -386,7 +414,7 @@ fn write_unquoted_string_list<'a>(
     writer.write_all(b"]")
 }
 
-fn write_escaped(writer: &mut impl Write, value: &[u8]) -> io::Result<()> {
+fn write_escaped(writer: &mut (impl Write + ?Sized), value: &[u8]) -> io::Result<()> {
     writer.write_all(b"\"")?;
     if memchr2(b'\r', b'\t', value).is_none() {
         let mut start = 0;
@@ -424,7 +452,7 @@ fn write_escaped(writer: &mut impl Write, value: &[u8]) -> io::Result<()> {
     writer.write_all(b"\"")
 }
 
-fn write_store_path(writer: &mut impl Write, path: &StorePath) -> io::Result<()> {
+fn write_store_path(writer: &mut (impl Write + ?Sized), path: &StorePath) -> io::Result<()> {
     writer.write_all(b"\"/nix/store/")?;
     writer.write_all(&nixbase32::encode_fixed::<32>(path.digest()))?;
     writer.write_all(b"-")?;
@@ -432,13 +460,13 @@ fn write_store_path(writer: &mut impl Write, path: &StorePath) -> io::Result<()>
     writer.write_all(b"\"")
 }
 
-fn write_unquoted(writer: &mut impl Write, value: &[u8]) -> io::Result<()> {
+fn write_unquoted(writer: &mut (impl Write + ?Sized), value: &[u8]) -> io::Result<()> {
     writer.write_all(b"\"")?;
     writer.write_all(value)?;
     writer.write_all(b"\"")
 }
 
-fn write_unquoted_hex(writer: &mut impl Write, value: &[u8]) -> io::Result<()> {
+fn write_unquoted_hex(writer: &mut (impl Write + ?Sized), value: &[u8]) -> io::Result<()> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     writer.write_all(b"\"")?;
     for byte in value {
@@ -448,7 +476,7 @@ fn write_unquoted_hex(writer: &mut impl Write, value: &[u8]) -> io::Result<()> {
 }
 
 fn write_method_algorithm(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     method: ContentAddressMethod,
     algorithm: HashAlgorithm,
 ) -> io::Result<()> {
@@ -460,9 +488,9 @@ fn write_method_algorithm(
 
 fn fixed_parts(ca: &CAHash) -> (String, NixHash) {
     match ca {
-        CAHash::Flat(hash) => (hash.algo().to_owned(), hash.clone()),
-        CAHash::Nar(hash) => (format!("r:{}", hash.algo()), hash.clone()),
+        CAHash::Flat(hash) => (hash.algorithm().to_string(), hash.clone()),
+        CAHash::Nar(hash) => (format!("r:{}", hash.algorithm()), hash.clone()),
         CAHash::Text(digest) => ("text:sha256".to_owned(), NixHash::Sha256(*digest)),
-        CAHash::Git(hash) => (format!("git:{}", hash.algo()), hash.clone()),
+        CAHash::Git(hash) => (format!("git:{}", hash.algorithm()), hash.clone()),
     }
 }

@@ -1,11 +1,27 @@
 //! Pure Rust Nix derivations.
 //!
-//! The ATerm representation is identity-bearing: its bytes determine the
+//! The `ATerm` representation is identity-bearing: its bytes determine the
 //! derivation's store path and participate in output-path hashing. Parsing is
 //! therefore byte-oriented and serialization follows Nix's canonical field
 //! order, escaping, and map ordering exactly.
+//!
+//! # Example
+//!
+//! ```
+//! use nix_derivation::DerivationBuilder;
+//!
+//! let derivation = DerivationBuilder::new("example", "x86_64-linux", "/bin/sh")
+//!     .input_addressed_output("out")
+//!     .argument("-c")
+//!     .argument("printf built > $out")
+//!     .build()?;
+//!
+//! assert!(derivation.resolved_outputs()["out"].path.is_some());
+//! # Ok::<(), nix_derivation::Error>(())
+//! ```
 
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -23,7 +39,7 @@ pub mod structured_attrs;
 mod write;
 
 pub use builder::{DerivationBuilder, ValidatedDerivation};
-pub use hash::{CAHash, NixHash};
+pub use hash::{CAHash, ContentAddressMethod, HashAlgorithm, NixHash};
 pub use store_path::StorePath;
 pub use structured_attrs::{StructuredAttrs, StructuredAttrsFiles};
 
@@ -32,32 +48,61 @@ mod tests;
 
 /// A derivation parse or semantic error.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
+    /// The byte input is not a well-formed supported derivation `ATerm`.
     #[error("ATerm parse error at byte {offset}: {message}")]
-    Parse { offset: usize, message: String },
+    Parse {
+        /// Byte offset at which parsing failed.
+        offset: usize,
+        /// Human-readable description of the expected syntax.
+        message: String,
+    },
+    /// A textual derivation field contains non-UTF-8 bytes.
     #[error("{field} is not valid UTF-8")]
-    InvalidUtf8 { field: &'static str },
+    InvalidUtf8 {
+        /// Name of the field containing invalid bytes.
+        field: &'static str,
+    },
+    /// A derivation field contains a malformed Nix store path.
     #[error("invalid store path in derivation: {0}")]
     InvalidStorePath(#[from] store_path::Error),
+    /// A derivation output contains a malformed or unsupported content hash.
     #[error("invalid content hash in derivation: {0}")]
     InvalidHash(#[from] hash::Error),
+    /// The structured-attribute JSON or requested file materialization is invalid.
     #[error("invalid structured attributes: {0}")]
     StructuredAttrs(String),
+    /// A fixed-output derivation does not have exactly one output named `out`.
     #[error(
         "fixed output derivation {name:?} has {outputs} outputs, expected exactly one named \"out\""
     )]
-    InvalidFixedOutputs { name: String, outputs: usize },
+    InvalidFixedOutputs {
+        /// Derivation name.
+        name: String,
+        /// Number of declared outputs.
+        outputs: usize,
+    },
+    /// A parsed derivation violates a semantic build invariant.
     #[error("invalid derivation: {0}")]
     InvalidDerivation(String),
 }
 
 /// Failure while resolving an input during derivation hashing or validation.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InputResolutionError<E> {
+    /// The derivation itself is malformed or semantically invalid.
     #[error(transparent)]
     Derivation(#[from] Error),
+    /// The caller's resolver failed for a particular input derivation.
     #[error("failed to resolve input derivation {path}: {error}")]
-    Resolve { path: StorePath, error: E },
+    Resolve {
+        /// Input derivation whose identity was requested.
+        path: StorePath,
+        /// Error returned by the resolver callback.
+        error: E,
+    },
 }
 
 /// A SHA-256 digest used by Nix's derivation-modulo hashing algorithm.
@@ -65,16 +110,19 @@ pub enum InputResolutionError<E> {
 pub struct DerivationModuloHash([u8; 32]);
 
 impl DerivationModuloHash {
+    /// Wrap raw SHA-256 digest bytes as a derivation-modulo hash.
     #[must_use]
     pub const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
+    /// Borrow the raw SHA-256 digest bytes.
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
+    /// Consume the newtype and return the raw SHA-256 digest bytes.
     #[must_use]
     pub const fn into_bytes(self) -> [u8; 32] {
         self.0
@@ -115,8 +163,11 @@ impl fmt::Display for DerivationModuloHash {
 /// not been resolved yet are deferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputDerivationHash {
+    /// Identity of an ordinary input-addressed derivation.
     Regular(DerivationModuloHash),
+    /// Content-derived identity of a fixed-output derivation.
     FixedOutput(DerivationModuloHash),
+    /// Identity cannot be calculated until another input or output is resolved.
     Deferred,
 }
 
@@ -133,16 +184,19 @@ impl From<DerivationModuloHash> for InputDerivationHash {
 }
 
 impl InputDerivationHash {
+    /// Construct an ordinary input-addressed identity.
     #[must_use]
     pub fn regular(hash: impl Into<DerivationModuloHash>) -> Self {
         Self::Regular(hash.into())
     }
 
+    /// Construct a fixed-output identity.
     #[must_use]
     pub fn fixed_output(hash: impl Into<DerivationModuloHash>) -> Self {
         Self::FixedOutput(hash.into())
     }
 
+    /// Return the regular hash, if this is an input-addressed identity.
     #[must_use]
     pub const fn regular_hash(&self) -> Option<&DerivationModuloHash> {
         match self {
@@ -151,6 +205,7 @@ impl InputDerivationHash {
         }
     }
 
+    /// Return the fixed-output hash, if this is a fixed-output identity.
     #[must_use]
     pub const fn fixed_output_hash(&self) -> Option<&DerivationModuloHash> {
         match self {
@@ -159,6 +214,7 @@ impl InputDerivationHash {
         }
     }
 
+    /// Whether this identity still depends on unresolved information.
     #[must_use]
     pub const fn is_deferred(&self) -> bool {
         matches!(self, Self::Deferred)
@@ -168,16 +224,26 @@ impl InputDerivationHash {
 /// State of the hash used to construct input-addressed output paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputPathHash {
+    /// A quotient hash that can be used to construct output paths.
     Ready(DerivationModuloHash),
+    /// The hash depends on an unresolved dynamic or content-addressed input.
     Deferred,
 }
 
+impl From<DerivationModuloHash> for OutputPathHash {
+    fn from(hash: DerivationModuloHash) -> Self {
+        Self::Ready(hash)
+    }
+}
+
 impl OutputPathHash {
+    /// Construct a ready output-path hash.
     #[must_use]
     pub fn ready(hash: impl Into<DerivationModuloHash>) -> Self {
         Self::Ready(hash.into())
     }
 
+    /// Borrow the ready hash, or return `None` when deferred.
     #[must_use]
     pub const fn as_ready(&self) -> Option<&DerivationModuloHash> {
         match self {
@@ -186,6 +252,7 @@ impl OutputPathHash {
         }
     }
 
+    /// Consume this state and return the ready hash, or `None` when deferred.
     #[must_use]
     pub const fn into_ready(self) -> Option<DerivationModuloHash> {
         match self {
@@ -194,97 +261,40 @@ impl OutputPathHash {
         }
     }
 
+    /// Whether calculating this hash requires more information.
     #[must_use]
     pub const fn is_deferred(&self) -> bool {
         matches!(self, Self::Deferred)
     }
 }
 
-/// Hash algorithms understood by Nix derivation output declarations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum HashAlgorithm {
-    Md5,
-    Sha1,
-    Sha256,
-    Sha512,
-}
-
-impl HashAlgorithm {
-    fn parse(value: &[u8]) -> Result<Self, Error> {
-        match value {
-            b"md5" => Ok(Self::Md5),
-            b"sha1" => Ok(Self::Sha1),
-            b"sha256" => Ok(Self::Sha256),
-            b"sha512" => Ok(Self::Sha512),
-            _ => Err(Error::Parse {
-                offset: 0,
-                message: format!(
-                    "unknown hash algorithm {:?}",
-                    String::from_utf8_lossy(value)
-                ),
-            }),
-        }
-    }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Md5 => "md5",
-            Self::Sha1 => "sha1",
-            Self::Sha256 => "sha256",
-            Self::Sha512 => "sha512",
-        }
-    }
-}
-
-/// How an output is ingested before hashing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ContentAddressMethod {
-    Flat,
-    Nar,
-    Text,
-    Git,
-}
-
-impl ContentAddressMethod {
-    fn parse_prefix(value: &[u8]) -> (Self, &[u8]) {
-        if let Some(rest) = value.strip_prefix(b"r:") {
-            (Self::Nar, rest)
-        } else if let Some(rest) = value.strip_prefix(b"text:") {
-            (Self::Text, rest)
-        } else if let Some(rest) = value.strip_prefix(b"git:") {
-            (Self::Git, rest)
-        } else {
-            (Self::Flat, value)
-        }
-    }
-
-    const fn prefix(self) -> &'static str {
-        match self {
-            Self::Flat => "",
-            Self::Nar => "r:",
-            Self::Text => "text:",
-            Self::Git => "git:",
-        }
-    }
-}
-
-/// The five output variants represented by Nix 2.34 derivation ATerms.
+/// The five output variants represented by Nix 2.34 derivation `ATerms`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
+    /// An input-addressed output whose path is known before building.
     InputAddressed {
+        /// Declared output store path.
         path: StorePath,
     },
+    /// A fixed output addressed by an expected content hash.
     Fixed {
+        /// Expected content address.
         ca: CAHash,
     },
+    /// A pure content-addressed output whose digest is known after building.
     Floating {
+        /// How the output is ingested before hashing.
         method: ContentAddressMethod,
+        /// Algorithm used to hash the ingested output.
         hash_algorithm: HashAlgorithm,
     },
+    /// An input-addressed output that cannot yet be resolved.
     Deferred,
+    /// An impure output accepted from an external source after building.
     Impure {
+        /// How the output is ingested before hashing.
         method: ContentAddressMethod,
+        /// Algorithm used to hash the ingested output.
         hash_algorithm: HashAlgorithm,
     },
 }
@@ -303,7 +313,7 @@ impl Output {
                 Ok(Some(store_path::build_ca_path(
                     &name,
                     ca,
-                    std::iter::empty(),
+                    std::iter::empty::<&StorePath>(),
                     false,
                 )?))
             }
@@ -312,6 +322,7 @@ impl Output {
     }
 
     #[must_use]
+    /// Return the expected content address for a fixed output.
     pub const fn fixed_content_address(&self) -> Option<&CAHash> {
         match self {
             Self::Fixed { ca } => Some(ca),
@@ -323,7 +334,9 @@ impl Output {
 /// Flattened output view for build translation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivationOutput {
+    /// Store path known before building, if this output kind has one.
     pub path: Option<StorePath>,
+    /// Expected fixed content address, if this is a fixed output.
     pub ca_hash: Option<CAHash>,
 }
 
@@ -331,14 +344,14 @@ pub struct DerivationOutput {
 ///
 /// `outputs` are requested directly from this derivation. Each
 /// `dynamic_outputs` entry follows an output which itself evaluates to a
-/// derivation, as represented by the `xp-dyn-drv` ATerm format.
+/// derivation, as represented by the `xp-dyn-drv` `ATerm` format.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InputDerivation {
     outputs: BTreeSet<String>,
     dynamic_outputs: BTreeMap<String, InputDerivation>,
 }
 
-/// Maximum recursive dynamic-input depth accepted from ATerms or builders.
+/// Maximum recursive dynamic-input depth accepted from `ATerms` or builders.
 pub const MAX_DYNAMIC_INPUT_DEPTH: usize = 256;
 
 impl InputDerivation {
@@ -354,6 +367,7 @@ impl InputDerivation {
         }
     }
 
+    /// Add a recursively requested dynamic output and return the updated value.
     pub fn with_dynamic_output(
         mut self,
         name: impl Into<String>,
@@ -363,10 +377,14 @@ impl InputDerivation {
         Ok(self)
     }
 
+    /// Request one direct output, returning whether it was newly inserted.
     pub fn insert_output(&mut self, output: impl Into<String>) -> bool {
         self.outputs.insert(output.into())
     }
 
+    /// Insert a recursively requested dynamic output.
+    ///
+    /// The returned value is the previous subtree with the same name, if any.
     pub fn insert_dynamic_output(
         &mut self,
         name: impl Into<String>,
@@ -393,6 +411,7 @@ impl InputDerivation {
     }
 
     #[must_use]
+    /// Whether this input follows any dynamically produced derivations.
     pub fn is_dynamic(&self) -> bool {
         !self.dynamic_outputs.is_empty()
     }
@@ -422,6 +441,7 @@ pub struct InputDerivationNode<'a> {
 }
 
 impl<'a> InputDerivationNode<'a> {
+    /// Number of dynamic-output edges between this node and the root.
     #[must_use]
     pub const fn depth(self) -> usize {
         self.depth
@@ -433,6 +453,7 @@ impl<'a> InputDerivationNode<'a> {
         self.dynamic_output
     }
 
+    /// Return the input-derivation node at this position.
     #[must_use]
     pub const fn input(self) -> &'a InputDerivation {
         self.input
@@ -505,7 +526,6 @@ impl Derivation {
 
     /// Consume this value for editing. [`DerivationBuilder::build`] validates
     /// the edited result before returning it.
-    #[must_use]
     pub fn into_builder(self) -> DerivationBuilder {
         DerivationBuilder::from_derivation(self)
     }
@@ -550,18 +570,19 @@ impl Derivation {
     }
 
     #[must_use]
+    /// Return the out-of-band derivation name without the `.drv` suffix.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Outputs in their lossless ATerm representation.
+    /// Outputs in their lossless `ATerm` representation.
     #[must_use]
     pub fn outputs(&self) -> &BTreeMap<String, Output> {
         &self.outputs
     }
 
-    /// Write Nix's canonical unmasked ATerm representation.
-    pub fn write_aterm(&self, writer: &mut impl io::Write) -> io::Result<()> {
+    /// Write Nix's canonical unmasked `ATerm` representation.
+    pub fn write_aterm<W: io::Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
         write::serialize(self, writer)
     }
 
@@ -581,6 +602,7 @@ impl Derivation {
     }
 
     #[must_use]
+    /// Input source store paths referenced directly by this derivation.
     pub fn input_sources(&self) -> &BTreeSet<StorePath> {
         &self.input_sources
     }
@@ -756,21 +778,19 @@ impl Derivation {
         Ok(Some(actual_inputs))
     }
 
+    /// Calculate this derivation's own `.drv` store path.
     pub fn drv_path(&self) -> Result<StorePath, Error> {
         let bytes = self.to_aterm_bytes();
-        let references: Vec<String> = self
-            .input_derivations
-            .keys()
-            .chain(self.input_sources.iter())
-            .map(StorePath::to_absolute_path)
-            .collect();
         Ok(store_path::build_text_path(
             &format!("{}.drv", self.name),
             &bytes,
-            references.iter().map(String::as_str),
+            self.input_derivations
+                .keys()
+                .chain(self.input_sources.iter()),
         )?)
     }
 
+    /// Determine whether this has the single fixed-output derivation shape.
     pub fn is_fixed_output(&self) -> Result<bool, Error> {
         Ok(matches!(self.output_type()?, OutputType::Fixed))
     }
@@ -923,7 +943,7 @@ impl Derivation {
                     .map(|name| {
                         Ok((
                             name.clone(),
-                            store_path::build_output_path(hash.as_bytes(), name, &self.name)?,
+                            store_path::build_output_path(hash, name, &self.name)?,
                         ))
                     })
                     .collect::<Result<_, Error>>()
@@ -1029,26 +1049,31 @@ impl Derivation {
     }
 
     #[must_use]
+    /// Return the platform identifier used to execute the builder.
     pub fn system(&self) -> &str {
         &self.system
     }
 
     #[must_use]
+    /// Return the executable or builtin builder identifier.
     pub fn builder(&self) -> &str {
         &self.builder
     }
 
     #[must_use]
+    /// Return the ordered builder arguments.
     pub fn arguments(&self) -> &[String] {
         &self.arguments
     }
 
     #[must_use]
+    /// Return ordinary environment entries, whose values may be arbitrary bytes.
     pub fn environment(&self) -> &BTreeMap<String, Vec<u8>> {
         &self.environment
     }
 
     #[must_use]
+    /// Return parsed structured attributes when the derivation uses `__structuredAttrs`.
     pub fn structured_attrs(&self) -> Option<&StructuredAttrs> {
         self.structured_attrs.as_ref()
     }
@@ -1197,7 +1222,7 @@ fn fixed_output_hash(ca: &CAHash, path: &StorePath) -> DerivationModuloHash {
     let mut digest = Sha256::new();
     digest.update(b"fixed:out:");
     digest.update(method_prefix.as_bytes());
-    digest.update(hash.algo().as_bytes());
+    digest.update(hash.algorithm().as_str().as_bytes());
     digest.update(b":");
     update_hex(&mut digest, hash.digest_as_bytes());
     digest.update(b":");

@@ -1,3 +1,5 @@
+//! Validated structured attributes and builder-file materialization.
+
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
@@ -58,11 +60,13 @@ impl StructuredAttrs {
     }
 
     #[must_use]
+    /// Return the number of top-level attributes.
     pub fn len(&self) -> usize {
         self.object().len()
     }
 
     #[must_use]
+    /// Whether the structured-attribute object has no entries.
     pub fn is_empty(&self) -> bool {
         self.object().is_empty()
     }
@@ -120,7 +124,9 @@ pub struct StructuredAttrsFiles {
 }
 
 impl StructuredAttrsFiles {
+    /// Filename Nix uses for canonical structured JSON.
     pub const JSON_FILE_NAME: &'static str = ".attrs.json";
+    /// Filename Nix uses for shell declarations.
     pub const SHELL_FILE_NAME: &'static str = ".attrs.sh";
 }
 

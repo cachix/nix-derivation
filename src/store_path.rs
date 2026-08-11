@@ -8,31 +8,45 @@ use std::str::FromStr;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-use crate::hash::{CAHash, NixHash};
+use crate::DerivationModuloHash;
+use crate::hash::{CAHash, ContentAddressMethod, HashAlgorithm, NixHash};
 use crate::nixbase32;
 
+/// Absolute directory containing Nix store objects.
 pub const STORE_DIR: &str = "/nix/store";
+/// Number of bytes in the compressed digest portion of a store path.
 pub const DIGEST_LEN: usize = 20;
+/// Maximum byte length of a Nix store-path name.
 pub const MAX_NAME_LEN: usize = 211;
 
 const DIGEST_CHARS: usize = 32;
 
+/// Failure to parse or construct a Nix store path.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
+    /// The supplied absolute path is outside [`STORE_DIR`].
     #[error("path does not start with {STORE_DIR}/")]
     NotInStoreDir,
+    /// The basename has no separator between its digest and name.
     #[error("store path has no `-` separating digest from name")]
     MissingSeparator,
+    /// The digest portion is not canonical Nix base32.
     #[error("invalid digest: {0}")]
     InvalidDigest(#[from] nixbase32::Error),
+    /// The name does not obey Nix's store-path name rules.
     #[error("invalid name {0:?}")]
     InvalidName(String),
-    #[error("invalid store-path reference {0:?}")]
-    InvalidReference(String),
+    /// The content-address method and algorithm do not support references.
     #[error("{method} content addressing does not allow references with this hash algorithm")]
-    ReferencesNotAllowed { method: &'static str },
+    ReferencesNotAllowed {
+        /// Content-address method that rejected the references.
+        method: ContentAddressMethod,
+    },
+    /// Git content addressing was paired with an unsupported hash algorithm.
     #[error("Git content addressing requires SHA-1 or SHA-256, got {0}")]
-    InvalidGitHashAlgorithm(&'static str),
+    InvalidGitHashAlgorithm(HashAlgorithm),
+    /// Text content addresses cannot refer to their own result.
     #[error("text content addressing does not allow a self reference")]
     TextSelfReference,
 }
@@ -95,6 +109,7 @@ pub(crate) fn validate_name(name: &str) -> Result<(), Error> {
 }
 
 impl StorePath {
+    /// Parse an absolute `/nix/store/<digest>-<name>` byte string.
     pub fn from_absolute_path(path: &[u8]) -> Result<Self, Error> {
         let prefix_len = const { STORE_DIR.len() + 1 };
         if path.len() <= prefix_len
@@ -117,6 +132,7 @@ impl StorePath {
         Self::from_parts(digest, name)
     }
 
+    /// Construct a store path from its compressed digest and validated name.
     pub fn from_parts(digest: [u8; DIGEST_LEN], name: &str) -> Result<Self, Error> {
         validate_name(name)?;
         Ok(Self {
@@ -126,26 +142,31 @@ impl StorePath {
     }
 
     #[must_use]
+    /// Return the compressed 20-byte store-path digest.
     pub const fn digest(&self) -> &[u8; DIGEST_LEN] {
         &self.digest
     }
 
     #[must_use]
+    /// Return the store-path name following the digest separator.
     pub fn name(&self) -> &str {
         &self.name
     }
 
     #[must_use]
+    /// Whether this path's name has the `.drv` suffix.
     pub fn is_derivation(&self) -> bool {
         self.name.ends_with(".drv")
     }
 
     #[must_use]
+    /// Render the complete absolute path, including [`STORE_DIR`].
     pub fn to_absolute_path(&self) -> String {
         self.to_string()
     }
 
     #[must_use]
+    /// Render `<digest>-<name>` without [`STORE_DIR`].
     pub fn to_basename(&self) -> String {
         format!("{}-{}", nixbase32::encode(&self.digest), self.name)
     }
@@ -155,9 +176,9 @@ impl StorePath {
 /// `builtins.toFile` values.
 pub fn build_text_path<'a, I>(name: &str, content: &[u8], references: I) -> Result<StorePath, Error>
 where
-    I: IntoIterator<Item = &'a str>,
+    I: IntoIterator<Item = &'a StorePath>,
 {
-    let references = parse_references(references)?;
+    let references = references.into_iter().cloned().collect();
     let ty = make_type("text", &references, false);
     let digest: [u8; 32] = Sha256::digest(content).into();
     make_store_path(&ty, &NixHash::Sha256(digest), name)
@@ -171,9 +192,9 @@ pub fn build_ca_path<'a, I>(
     self_reference: bool,
 ) -> Result<StorePath, Error>
 where
-    I: IntoIterator<Item = &'a str>,
+    I: IntoIterator<Item = &'a StorePath>,
 {
-    let references = parse_references(references)?;
+    let references = references.into_iter().cloned().collect();
     match ca {
         CAHash::Text(digest) => {
             if self_reference {
@@ -191,7 +212,7 @@ where
             name,
         ),
         CAHash::Git(hash) if !matches!(hash, NixHash::Sha1(_) | NixHash::Sha256(_)) => {
-            Err(Error::InvalidGitHashAlgorithm(hash.algo()))
+            Err(Error::InvalidGitHashAlgorithm(hash.algorithm()))
         }
         CAHash::Flat(hash) | CAHash::Nar(hash) | CAHash::Git(hash) => {
             if !references.is_empty() || self_reference {
@@ -207,7 +228,7 @@ where
             };
             let payload = format!(
                 "fixed:out:{ingestion_prefix}{}:{}:",
-                hash.algo(),
+                hash.algorithm(),
                 encode_hex(hash.digest_as_bytes())
             );
             let digest: [u8; 32] = Sha256::digest(payload.as_bytes()).into();
@@ -218,14 +239,14 @@ where
 
 /// Construct the path of an input-addressed derivation output.
 pub fn build_output_path(
-    output_path_modulo: &[u8; 32],
+    output_path_modulo: DerivationModuloHash,
     output_name: &str,
     drv_name: &str,
 ) -> Result<StorePath, Error> {
     let name = output_path_name(drv_name, output_name)?;
     make_store_path(
         &format!("output:{output_name}"),
-        &NixHash::Sha256(*output_path_modulo),
+        &NixHash::Sha256(output_path_modulo.into_bytes()),
         &name,
     )
 }
@@ -252,7 +273,7 @@ fn make_store_path(ty: &str, hash: &NixHash, name: &str) -> Result<StorePath, Er
     validate_name(name)?;
     let fingerprint = format!(
         "{ty}:{}:{}:{STORE_DIR}:{name}",
-        hash.algo(),
+        hash.algorithm(),
         encode_hex(hash.digest_as_bytes())
     );
     let full_digest = Sha256::digest(fingerprint.as_bytes());
@@ -261,19 +282,6 @@ fn make_store_path(ty: &str, hash: &NixHash, name: &str) -> Result<StorePath, Er
         digest[index % DIGEST_LEN] ^= byte;
     }
     StorePath::from_parts(digest, name)
-}
-
-fn parse_references<'a, I>(references: I) -> Result<BTreeSet<StorePath>, Error>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    references
-        .into_iter()
-        .map(|reference| {
-            StorePath::from_absolute_path(reference.as_bytes())
-                .map_err(|_| Error::InvalidReference(reference.to_owned()))
-        })
-        .collect()
 }
 
 fn make_type(prefix: &str, references: &BTreeSet<StorePath>, self_reference: bool) -> String {
@@ -342,14 +350,10 @@ mod tests {
 
     #[test]
     fn reference_order_and_duplicates_do_not_change_paths() {
-        let a = StorePath::from_parts([1; DIGEST_LEN], "a")
-            .unwrap()
-            .to_absolute_path();
-        let b = StorePath::from_parts([2; DIGEST_LEN], "b")
-            .unwrap()
-            .to_absolute_path();
-        let left = build_text_path("x", b"x", [&a[..], &b[..], &a[..]]).unwrap();
-        let right = build_text_path("x", b"x", [&b[..], &a[..]]).unwrap();
+        let a = StorePath::from_parts([1; DIGEST_LEN], "a").unwrap();
+        let b = StorePath::from_parts([2; DIGEST_LEN], "b").unwrap();
+        let left = build_text_path("x", b"x", [&a, &b, &a]).unwrap();
+        let right = build_text_path("x", b"x", [&b, &a]).unwrap();
         assert_eq!(left, right);
     }
 
@@ -371,7 +375,7 @@ mod tests {
                 std::iter::empty(),
                 false,
             ),
-            Err(Error::InvalidGitHashAlgorithm("md5"))
+            Err(Error::InvalidGitHashAlgorithm(HashAlgorithm::Md5))
         ));
     }
 }

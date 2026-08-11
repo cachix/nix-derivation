@@ -77,12 +77,10 @@ parsed value with `into_validated()`, or parse and validate in one step with
 `ValidatedDerivation::from_aterm_bytes()`.
 
 ```rust
-use nix_derivation::{DerivationBuilder, Output, StorePath};
+use nix_derivation::DerivationBuilder;
 
-let output_path: StorePath =
-    "/nix/store/j4vdph5j6dn2hj3lc810ks94hwa3q36z-example".parse()?;
 let drv = DerivationBuilder::new("example", "x86_64-linux", "/bin/sh")
-    .output("out", Output::InputAddressed { path: output_path })
+    .input_addressed_output("out")
     .argument("-c")
     .argument("printf built > $out")
     .build()?;
@@ -153,7 +151,12 @@ fn inspect(bytes: &[u8], name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 `write_aterm()` streams canonical bytes to any `std::io::Write` without first
 allocating a complete byte buffer. `to_aterm_bytes()` returns a newly allocated
-buffer and cannot fail. `StorePath` implements `Display` and `FromStr`.
+buffer and cannot fail. `StorePath`, `NixHash`, `CAHash`, `HashAlgorithm`, and
+`ContentAddressMethod` implement `FromStr`; all but `NixHash` also implement
+`Display` with an unambiguous canonical name or Nix encoding. Store-path
+constructors take validated `StorePath` references, and `build_output_path`
+takes a `DerivationModuloHash`, so callers do not need to round-trip typed
+identities through strings or untagged digest bytes.
 
 ## Benchmarks
 

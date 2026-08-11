@@ -7,6 +7,7 @@ use crate::{
 
 /// Construct or edit a derivation, validating all invariants at the end.
 #[derive(Debug, Clone)]
+#[must_use = "a derivation builder has no effect until it is built"]
 pub struct DerivationBuilder {
     name: String,
     outputs: BTreeMap<String, Output>,
@@ -42,7 +43,6 @@ impl DerivationBuilder {
     }
 
     /// Consume a parsed derivation for zero-copy editing.
-    #[must_use]
     pub fn from_derivation(derivation: Derivation) -> Self {
         Self {
             name: derivation.name,
@@ -58,79 +58,145 @@ impl DerivationBuilder {
         }
     }
 
-    #[must_use]
+    /// Declare or replace an output.
     pub fn output(mut self, name: impl Into<String>, output: Output) -> Self {
         self.outputs.insert(name.into(), output);
         self
     }
 
-    #[must_use]
+    /// Declare an input-addressed output whose store path will be calculated by [`Self::build`].
+    ///
+    /// When dynamic or content-addressed inputs prevent immediate resolution,
+    /// the resulting validated derivation retains a deferred output instead.
+    pub fn input_addressed_output(self, name: impl Into<String>) -> Self {
+        self.output(name, Output::Deferred)
+    }
+
+    /// Declare or replace an input derivation and its requested outputs.
     pub fn input_derivation(mut self, path: StorePath, input: InputDerivation) -> Self {
         self.input_derivations.insert(path, input);
         self
     }
 
-    #[must_use]
+    /// Add a directly referenced input source.
     pub fn input_source(mut self, path: StorePath) -> Self {
         self.input_sources.insert(path);
         self
     }
 
-    #[must_use]
+    /// Append one builder argument.
     pub fn argument(mut self, argument: impl Into<String>) -> Self {
         self.arguments.push(argument.into());
         self
     }
 
-    #[must_use]
+    /// Declare or replace an ordinary environment entry.
     pub fn environment(mut self, key: impl Into<String>, value: impl Into<Vec<u8>>) -> Self {
         self.environment.insert(key.into(), value.into());
         self
     }
 
-    #[must_use]
+    /// Enable structured attributes with a validated JSON object.
     pub fn structured_attrs(mut self, attrs: StructuredAttrs) -> Self {
         self.structured_attrs = Some(attrs);
         self
     }
 
+    /// Return the derivation name without its `.drv` suffix.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Return the output declarations accumulated so far.
+    #[must_use]
+    pub fn outputs(&self) -> &BTreeMap<String, Output> {
+        &self.outputs
+    }
+
+    /// Return the input derivations accumulated so far.
+    #[must_use]
+    pub fn input_derivations(&self) -> &BTreeMap<StorePath, InputDerivation> {
+        &self.input_derivations
+    }
+
+    /// Return the direct input sources accumulated so far.
+    #[must_use]
+    pub fn input_sources(&self) -> &BTreeSet<StorePath> {
+        &self.input_sources
+    }
+
+    /// Return the platform identifier used to execute the builder.
+    #[must_use]
+    pub fn system(&self) -> &str {
+        &self.system
+    }
+
+    /// Return the executable or builtin builder identifier.
+    #[must_use]
+    pub fn builder(&self) -> &str {
+        &self.builder
+    }
+
+    /// Return the ordered builder arguments accumulated so far.
+    #[must_use]
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
+
+    /// Return ordinary environment entries accumulated so far.
+    #[must_use]
+    pub fn environment_entries(&self) -> &BTreeMap<String, Vec<u8>> {
+        &self.environment
+    }
+
+    /// Return the structured attributes accumulated so far.
+    #[must_use]
+    pub fn structured_attrs_ref(&self) -> Option<&StructuredAttrs> {
+        self.structured_attrs.as_ref()
+    }
+
+    /// Mutably access the derivation name.
     pub fn name_mut(&mut self) -> &mut String {
         &mut self.name
     }
 
+    /// Mutably access all output declarations.
     pub fn outputs_mut(&mut self) -> &mut BTreeMap<String, Output> {
         &mut self.outputs
     }
 
+    /// Mutably access all input derivations.
     pub fn input_derivations_mut(&mut self) -> &mut BTreeMap<StorePath, InputDerivation> {
         &mut self.input_derivations
     }
 
+    /// Mutably access all direct input sources.
     pub fn input_sources_mut(&mut self) -> &mut BTreeSet<StorePath> {
         &mut self.input_sources
     }
 
+    /// Mutably access the platform identifier.
     pub fn system_mut(&mut self) -> &mut String {
         &mut self.system
     }
 
+    /// Mutably access the executable or builtin builder identifier.
     pub fn builder_mut(&mut self) -> &mut String {
         &mut self.builder
     }
 
+    /// Mutably access the ordered builder arguments.
     pub fn arguments_mut(&mut self) -> &mut Vec<String> {
         &mut self.arguments
     }
 
+    /// Mutably access all ordinary environment entries.
     pub fn environment_mut(&mut self) -> &mut BTreeMap<String, Vec<u8>> {
         &mut self.environment
     }
 
+    /// Mutably access the optional structured attributes.
     pub fn structured_attrs_mut(&mut self) -> &mut Option<StructuredAttrs> {
         &mut self.structured_attrs
     }
@@ -217,7 +283,7 @@ impl From<Derivation> for DerivationBuilder {
 pub struct ValidatedDerivation(Derivation);
 
 impl ValidatedDerivation {
-    /// Parse and validate a canonical or non-canonical derivation ATerm.
+    /// Parse and validate a canonical or non-canonical derivation `ATerm`.
     pub fn from_aterm_bytes(bytes: &[u8], name: &str) -> Result<Self, Error> {
         Derivation::from_aterm_bytes(bytes, name)?.into_validated()
     }
@@ -261,17 +327,19 @@ impl ValidatedDerivation {
         Ok(Self(derivation))
     }
 
+    /// Borrow the underlying syntactically representable derivation.
     #[must_use]
     pub const fn as_derivation(&self) -> &Derivation {
         &self.0
     }
 
+    /// Unwrap this value without changing its fields.
     #[must_use]
     pub fn into_derivation(self) -> Derivation {
         self.0
     }
 
-    #[must_use]
+    /// Consume this value for editing and subsequent revalidation.
     pub fn into_builder(self) -> DerivationBuilder {
         self.0.into_builder()
     }
@@ -284,6 +352,7 @@ impl ValidatedDerivation {
             .expect("validated derivation has resolvable output declarations")
     }
 
+    /// Determine whether this is a fixed-output derivation.
     #[must_use]
     pub fn is_fixed_output(&self) -> bool {
         self.0
@@ -291,6 +360,7 @@ impl ValidatedDerivation {
             .expect("validated derivation has one consistent output type")
     }
 
+    /// Calculate this derivation's own `.drv` store path.
     #[must_use]
     pub fn drv_path(&self) -> StorePath {
         self.0
