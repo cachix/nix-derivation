@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] - 2026-08-11
+
+### Added
+
+- Add `StoreDir` and store-aware parsing, rendering, path-construction, builder,
+  and validated-derivation APIs for non-default logical store directories such
+  as Guix's `/gnu/store`.
+- Add an opt-in Antithesis workload that exercises parsing, serialization,
+  validation, structured attributes, and store-path round trips with mutated
+  and arbitrary inputs.
+- Add Guix fixtures and parity tests covering alternate-store derivation paths,
+  outputs, inputs, structured attributes, placeholders, and ATerm escaping.
+
+### Changed
+
+- Carry the configured store directory through derivation serialization,
+  hashing, output calculation, and structured-attribute generation while
+  preserving the existing `/nix/store` APIs as default-store wrappers.
+
 ## [0.2.0] - 2026-08-10
 
 ### Breaking changes
@@ -48,5 +67,6 @@ All notable changes to this project are documented in this file.
 
 - Initial release.
 
+[0.3.0]: https://github.com/cachix/nix-derivation/releases/tag/0.3.0
 [0.2.0]: https://github.com/cachix/nix-derivation/releases/tag/0.2.0
 [0.1.0]: https://crates.io/crates/nix-derivation/0.1.0
