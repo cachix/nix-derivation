@@ -188,6 +188,24 @@ a fresh derivation on every iteration, while “Serialize (warm)” uses the
 checked derivation whose structured-attribute canonicalization cache was
 populated by that setup.
 
+### Antithesis workload
+
+An opt-in Antithesis driver expands the fixed corpus with coverage-guided
+mutations and arbitrary byte inputs. It states properties for panic-free
+parsing, canonical ATerm and structured-JSON serialization, streaming writer
+equivalence, validation consistency, and store-path round trips. Run a finite
+local smoke test with:
+
+```console
+cargo run --features antithesis --bin antithesis-driver -- 1000
+```
+
+The SDK uses local randomness outside Antithesis. Pass `0` instead of an
+iteration count for an unbounded workload in an Antithesis test container.
+Build that binary with the Rust coverage flags from the
+[Antithesis instrumentation guide][antithesis-rust-instrumentation]; the
+optional feature links the required instrumentation runtime.
+
 These results were measured on the same machine as the comparison below, with
 each benchmark restricted to one CPU core and run for seven samples:
 
@@ -257,4 +275,5 @@ supported features.
 
 [nix-benchmark]: https://github.com/NixOS/nix/blob/2.34.4/src/libstore-tests/derivation-parser-bench.cc
 [nix-fixtures]: https://github.com/NixOS/nix/tree/2.34.4/src/libstore-tests/data/derivation
+[antithesis-rust-instrumentation]: https://antithesis.com/docs/using_antithesis/sdk/rust/instrumentation
 [nix-modulo-refactor]: https://github.com/NixOS/nix/pull/16191

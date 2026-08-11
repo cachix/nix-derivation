@@ -9,13 +9,23 @@ readme = "README.md"
 keywords = ["nix", "derivation", "aterm"]
 categories = ["parser-implementations", "data-structures"]
 
+[features]
+antithesis = ["dep:antithesis-instrumentation", "dep:antithesis_sdk"]
+
 [dependencies]
+antithesis-instrumentation = { version = "0.1", optional = true }
+antithesis_sdk = { version = "0.2.9", optional = true }
 base64 = "0.22"
 memchr = "2"
 serde = "1"
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 thiserror = "2"
+
+[[bin]]
+name = "antithesis-driver"
+path = "src/bin/antithesis_driver.rs"
+required-features = ["antithesis"]
 
 [[bench]]
 name = "parse"
