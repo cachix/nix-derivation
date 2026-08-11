@@ -39,9 +39,8 @@ fn parse(path: &Path) -> Derivation {
 /// Reserializing a parsed derivation must reproduce the exact bytes.
 ///
 /// This is not a stylistic nicety. The derivation's store path is the text hash
-/// of these bytes, and obrador does not persist `.drv` files: it reserializes
-/// them on `read_file`. A single byte of drift makes the path stop content
-/// addressing its own contents.
+/// of these bytes. A store that reserializes derivations on read relies on a
+/// single byte of drift not making the path stop addressing its own contents.
 #[test]
 fn aterm_round_trip_is_byte_exact() {
     let Some(drvs) = corpus_or_skip() else { return };
@@ -153,8 +152,8 @@ fn output_path_modulo(
 /// it. Input addressed outputs go through `build_output_path`, fixed output
 /// ones through `build_ca_path`.
 ///
-/// This is the test that decides whether obrador interoperates with the rest of
-/// the Nix world.
+/// This is the test that decides whether the implementation interoperates with
+/// the rest of the Nix world.
 #[test]
 fn output_paths_match_output_path_modulo() {
     let Some(drvs) = corpus_or_skip() else { return };

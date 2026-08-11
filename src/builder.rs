@@ -2,13 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 use crate::{
-    Derivation, DerivationOutput, Error, InputDerivation, Output, StorePath, StructuredAttrs,
+    Derivation, DerivationOutput, Error, InputDerivation, Output, StoreDir, StorePath,
+    StructuredAttrs,
 };
 
 /// Construct or edit a derivation, validating all invariants at the end.
 #[derive(Debug, Clone)]
 #[must_use = "a derivation builder has no effect until it is built"]
 pub struct DerivationBuilder {
+    store_dir: StoreDir,
     name: String,
     outputs: BTreeMap<String, Output>,
     input_derivations: BTreeMap<StorePath, InputDerivation>,
@@ -28,7 +30,18 @@ impl DerivationBuilder {
         system: impl Into<String>,
         builder: impl Into<String>,
     ) -> Self {
+        Self::new_in_store(StoreDir::default(), name, system, builder)
+    }
+
+    /// Start a derivation in a configured logical store directory.
+    pub fn new_in_store(
+        store_dir: StoreDir,
+        name: impl Into<String>,
+        system: impl Into<String>,
+        builder: impl Into<String>,
+    ) -> Self {
         Self {
+            store_dir,
             name: name.into(),
             outputs: BTreeMap::new(),
             input_derivations: BTreeMap::new(),
@@ -45,6 +58,7 @@ impl DerivationBuilder {
     /// Consume a parsed derivation for zero-copy editing.
     pub fn from_derivation(derivation: Derivation) -> Self {
         Self {
+            store_dir: derivation.store_dir,
             name: derivation.name,
             outputs: derivation.outputs,
             input_derivations: derivation.input_derivations,
@@ -106,6 +120,12 @@ impl DerivationBuilder {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Return the logical store directory used for path identities.
+    #[must_use]
+    pub fn store_dir(&self) -> &StoreDir {
+        &self.store_dir
     }
 
     /// Return the output declarations accumulated so far.
@@ -254,6 +274,7 @@ impl DerivationBuilder {
 
     fn into_derivation(self) -> Derivation {
         Derivation {
+            store_dir: self.store_dir,
             name: self.name,
             outputs: self.outputs,
             input_derivations: self.input_derivations,
@@ -288,6 +309,15 @@ impl ValidatedDerivation {
         Derivation::from_aterm_bytes(bytes, name)?.into_validated()
     }
 
+    /// Parse and validate using a configured logical store directory.
+    pub fn from_aterm_bytes_in(
+        bytes: &[u8],
+        name: &str,
+        store_dir: StoreDir,
+    ) -> Result<Self, Error> {
+        Derivation::from_aterm_bytes_in(bytes, name, store_dir)?.into_validated()
+    }
+
     /// Parse and validate using input derivation modulo hashes.
     pub fn from_aterm_bytes_with_input_hashes<F, H>(
         bytes: &[u8],
@@ -301,6 +331,21 @@ impl ValidatedDerivation {
         Derivation::from_aterm_bytes(bytes, name)?.into_validated_with_input_hashes(resolve)
     }
 
+    /// Parse and validate in a configured logical store using input hashes.
+    pub fn from_aterm_bytes_with_input_hashes_in<F, H>(
+        bytes: &[u8],
+        name: &str,
+        store_dir: StoreDir,
+        resolve: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnMut(&StorePath) -> H,
+        H: Into<crate::InputDerivationHash>,
+    {
+        Derivation::from_aterm_bytes_in(bytes, name, store_dir)?
+            .into_validated_with_input_hashes(resolve)
+    }
+
     /// Fallible form of [`Self::from_aterm_bytes_with_input_hashes`].
     pub fn try_from_aterm_bytes_with_input_hashes<F, E, H>(
         bytes: &[u8],
@@ -312,6 +357,21 @@ impl ValidatedDerivation {
         H: Into<crate::InputDerivationHash>,
     {
         let derivation = Derivation::from_aterm_bytes(bytes, name)?;
+        Self::try_from_with_input_hashes(derivation, resolve)
+    }
+
+    /// Fallible input-resolution form using a configured logical store.
+    pub fn try_from_aterm_bytes_with_input_hashes_in<F, E, H>(
+        bytes: &[u8],
+        name: &str,
+        store_dir: StoreDir,
+        resolve: F,
+    ) -> Result<Self, crate::InputResolutionError<E>>
+    where
+        F: FnMut(&StorePath) -> Result<H, E>,
+        H: Into<crate::InputDerivationHash>,
+    {
+        let derivation = Derivation::from_aterm_bytes_in(bytes, name, store_dir)?;
         Self::try_from_with_input_hashes(derivation, resolve)
     }
 

@@ -9,7 +9,7 @@ use memchr::memchr_iter;
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 
-use crate::{Error, StorePath, store_path};
+use crate::{Error, StoreDir, StorePath, store_path};
 
 /// Validated structured attributes extracted from a derivation's `__json`
 /// transport entry.
@@ -132,6 +132,7 @@ impl StructuredAttrsFiles {
 
 pub(super) fn files(
     attrs: &StructuredAttrs,
+    store_dir: &StoreDir,
     output_paths: &BTreeMap<String, StorePath>,
 ) -> Result<StructuredAttrsFiles, Error> {
     let object = attrs.object();
@@ -147,7 +148,7 @@ pub(super) fn files(
         ));
     }
 
-    let replacements = OutputReplacements::new(output_paths);
+    let replacements = OutputReplacements::new(store_dir, output_paths);
     let mut json = Vec::new();
     write_attrs_json(object, &replacements, &mut json);
     Ok(StructuredAttrsFiles {
@@ -168,12 +169,12 @@ struct OutputReplacements<'a> {
 }
 
 impl<'a> OutputReplacements<'a> {
-    fn new(output_paths: &'a BTreeMap<String, StorePath>) -> Self {
+    fn new(store_dir: &StoreDir, output_paths: &'a BTreeMap<String, StorePath>) -> Self {
         let entries: Vec<_> = output_paths
             .iter()
             .map(|(name, path)| OutputReplacement {
                 name,
-                path: path.to_absolute_path(),
+                path: path.to_absolute_path_in(store_dir),
             })
             .collect();
         let mut placeholders = HashMap::with_capacity(entries.len());

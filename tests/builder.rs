@@ -1,5 +1,5 @@
 use nix_derivation::{
-    DerivationBuilder, Error, InputDerivation, Output, StorePath, StructuredAttrs,
+    DerivationBuilder, Error, InputDerivation, Output, StoreDir, StorePath, StructuredAttrs,
     ValidatedDerivation,
 };
 
@@ -12,6 +12,43 @@ fn output() -> Output {
     Output::InputAddressed {
         path: OUTPUT_PATH.parse().unwrap(),
     }
+}
+
+#[test]
+fn alternate_store_is_used_for_paths_hashes_and_aterm() {
+    let store_dir = StoreDir::new("/guix/store").unwrap();
+    let derivation =
+        DerivationBuilder::new_in_store(store_dir.clone(), "example", "x86_64-darwin", "/bin/sh")
+            .input_addressed_output("out")
+            .argument("-c")
+            .argument("printf built > $out")
+            .build()
+            .unwrap();
+
+    let output = derivation.resolved_outputs()["out"]
+        .path
+        .as_ref()
+        .unwrap()
+        .to_absolute_path_in(&store_dir);
+    assert!(output.starts_with("/guix/store/"));
+    assert_eq!(derivation.environment()["out"], output.as_bytes());
+
+    let bytes = derivation.to_aterm_bytes();
+    assert!(
+        bytes
+            .windows(store_dir.as_str().len())
+            .any(|window| { window == store_dir.as_str().as_bytes() })
+    );
+    let reparsed =
+        ValidatedDerivation::from_aterm_bytes_in(&bytes, derivation.name(), store_dir.clone())
+            .unwrap();
+    assert_eq!(reparsed, derivation);
+    assert!(
+        reparsed
+            .drv_path()
+            .to_absolute_path_in(&store_dir)
+            .starts_with("/guix/store/")
+    );
 }
 
 #[test]

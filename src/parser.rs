@@ -5,11 +5,15 @@ use memchr::{memchr, memchr2};
 
 use crate::{
     CAHash, ContentAddressMethod, Derivation, Error, HashAlgorithm, InputDerivation, Output,
-    StorePath,
+    StoreDir, StorePath,
 };
 
-pub(super) fn parse(bytes: &[u8], name: &str) -> Result<Derivation, Error> {
-    let mut parser = Parser { bytes, pos: 0 };
+pub(super) fn parse(bytes: &[u8], name: &str, store_dir: StoreDir) -> Result<Derivation, Error> {
+    let mut parser = Parser {
+        bytes,
+        pos: 0,
+        store_dir: &store_dir,
+    };
     let version = if parser.consume(b"DrvWithVersion(") {
         let version = parser.string("derivation ATerm version")?;
         if version != "xp-dyn-drv" {
@@ -62,6 +66,7 @@ pub(super) fn parse(bytes: &[u8], name: &str) -> Result<Derivation, Error> {
         .transpose()?;
 
     let derivation = Derivation {
+        store_dir,
         name: name.to_owned(),
         outputs,
         input_derivations,
@@ -77,7 +82,7 @@ pub(super) fn parse(bytes: &[u8], name: &str) -> Result<Derivation, Error> {
     // names. Validate it once so later canonical serialization is infallible.
     for (output_name, output) in &derivation.outputs {
         if matches!(output, Output::Fixed { .. }) {
-            output.path(name, output_name)?;
+            output.path_in(&derivation.store_dir, name, output_name)?;
         }
     }
     Ok(derivation)
@@ -92,6 +97,7 @@ enum Version {
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
+    store_dir: &'a StoreDir,
 }
 
 impl Parser<'_> {
@@ -224,11 +230,13 @@ impl Parser<'_> {
     }
 
     fn store_path(&mut self, field: &'static str) -> Result<StorePath, Error> {
-        let bytes = self.bytes_cow()?;
-        StorePath::from_absolute_path(&bytes).map_err(|error| Error::Parse {
-            offset: self.pos,
-            message: format!("invalid {field}: {error}"),
-        })
+        let bytes = self.bytes()?;
+        self.store_dir
+            .parse_path(&bytes)
+            .map_err(|error| Error::Parse {
+                offset: self.pos,
+                message: format!("invalid {field}: {error}"),
+            })
     }
 
     fn store_path_set(&mut self) -> Result<BTreeSet<StorePath>, Error> {
@@ -287,7 +295,7 @@ impl Parser<'_> {
                 Output::Deferred
             } else {
                 Output::InputAddressed {
-                    path: StorePath::from_absolute_path(&path)?,
+                    path: self.store_dir.parse_path(&path)?,
                 }
             }
         } else {
@@ -317,7 +325,7 @@ impl Parser<'_> {
                 // Nix validates but does not retain the serialized fixed path;
                 // canonical serialization recomputes it from the content
                 // address and the out-of-band derivation name.
-                StorePath::from_absolute_path(&path)?;
+                self.store_dir.parse_path(&path)?;
                 let ca = fixed_content_address(method, hash_algorithm, &hash)?;
                 Output::Fixed { ca }
             }

@@ -320,7 +320,8 @@ fn structured_attrs_files_merge_outputs_and_rewrite_borrowed_values() {
         ("out".to_owned(), out.parse().unwrap()),
     ]);
 
-    let files = crate::structured_attrs::files(&attrs, &output_paths).unwrap();
+    let files =
+        crate::structured_attrs::files(&attrs, &crate::StoreDir::default(), &output_paths).unwrap();
 
     assert_eq!(
         files.json,
@@ -359,7 +360,8 @@ fn structured_attrs_files_rewrite_many_repeated_placeholders() {
         ("out".to_owned(), out.parse().unwrap()),
     ]);
 
-    let files = crate::structured_attrs::files(&attrs, &output_paths).unwrap();
+    let files =
+        crate::structured_attrs::files(&attrs, &crate::StoreDir::default(), &output_paths).unwrap();
     let expected_message = out.repeat(REPETITIONS);
 
     assert_eq!(

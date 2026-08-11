@@ -16,7 +16,7 @@ or C++ runtime, and all its dependencies are published Rust crates.
 | Inputs | Input sources, requested outputs from input derivations, and nested trees of dynamic outputs. Trees can be constructed, traversed without recursion with `walk()`, and measured with `max_depth()`. Parsing and construction enforce a depth limit of 256. |
 | Structured attributes | Reads `__json` as a JSON object supported by Nix while preserving its original bytes. Provides type-checked lookup and iteration, produces Nix-compatible canonical JSON (including float formatting), and generates `.attrs.json` and `.attrs.sh` files with concrete output paths for the builder. |
 | Derivation hashing | Type-directed derivation-modulo hashing: `hash_input_derivation_modulo` returns an `InputDerivationHash`, while `hash_output_path_modulo` returns an explicit ready-or-deferred `OutputPathHash`. SHA-256 values use the distinct `DerivationModuloHash` type. The intermediate representation resolves input derivation paths to hashes and cannot contain unresolved dynamic inputs. |
-| Store paths | Parsing, validation, and rendering of `/nix/store` paths; Nix base32; text, content-addressed, derivation-output, and `.drv` path construction; and `builtins.placeholder` values. |
+| Store paths | Parsing, validation, and rendering with configurable logical store directories; Nix base32; text, content-addressed, derivation-output, and `.drv` path construction; and `builtins.placeholder` values. |
 | Rust construction | `DerivationBuilder` for type-checked construction and edits, plus `ValidatedDerivation`, an owned derivation whose build rules have already been checked. |
 | Safety | `#![forbid(unsafe_code)]`, a fixed maximum nesting depth, structured error types, and parser tests that verify malformed, truncated, and size-limited arbitrary input never causes a panic. |
 
@@ -52,7 +52,6 @@ that use them.
 Generating an `exportReferencesGraph` structured attribute requires store
 metadata, so it is left to code that connects this crate to a store. Generating
 the structured files without store access returns an error for this attribute.
-Store-path construction currently targets the standard `/nix/store` directory.
 
 ## Compatibility and tests
 
@@ -107,6 +106,32 @@ form if that callback can return an error. Parsed derivations are validated
 without being modified; use
 `validate_with_input_hashes` or `into_validated_with_input_hashes` for the same
 input-dependent case.
+
+Use `StoreDir` when paths belong to a non-default logical store. Its bytes are
+used consistently for parsing, rendering, derivation serialization, and store
+path fingerprints:
+
+```rust
+use nix_derivation::{DerivationBuilder, StoreDir};
+
+let store_dir = StoreDir::new("/guix/store")?;
+let drv = DerivationBuilder::new_in_store(
+    store_dir.clone(),
+    "example",
+    "x86_64-linux",
+    "/bin/sh",
+)
+.input_addressed_output("out")
+.build()?;
+
+let output = drv.resolved_outputs()["out"]
+    .path
+    .as_ref()
+    .expect("input-addressed output")
+    .to_absolute_path_in(&store_dir);
+assert!(output.starts_with("/guix/store/"));
+# Ok::<(), nix_derivation::Error>(())
+```
 
 Read methods borrow data from the owned value: outputs and inputs are exposed
 as maps and sets, arguments as a slice, strings as `&str`, and byte-valued

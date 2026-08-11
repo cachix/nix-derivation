@@ -14,7 +14,7 @@ trait AtermForm {
     fn uses_dynamic_wrapper(&self, derivation: &Derivation) -> bool;
     fn write_output(
         &self,
-        derivation: &Derivation,
+        _derivation: &Derivation,
         writer: &mut (impl Write + ?Sized),
         name: &str,
         output: &Output,
@@ -26,7 +26,7 @@ trait AtermForm {
     ) -> io::Result<()>;
     fn environment_value<'a>(
         &self,
-        derivation: &Derivation,
+        _derivation: &Derivation,
         key: &str,
         value: &'a [u8],
     ) -> &'a [u8];
@@ -73,7 +73,11 @@ fn serialize_form<F: AtermForm>(
     writer.write_all(b",")?;
     form.write_inputs(derivation, writer)?;
     writer.write_all(b",")?;
-    write_store_paths(writer, derivation.input_sources.iter())?;
+    write_store_paths(
+        writer,
+        &derivation.store_dir,
+        derivation.input_sources.iter(),
+    )?;
     writer.write_all(b",")?;
     write_unquoted(writer, derivation.system.as_bytes())?;
     writer.write_all(b",")?;
@@ -117,7 +121,7 @@ fn write_full_inputs(
             writer.write_all(b",")?;
         }
         writer.write_all(b"(")?;
-        write_store_path(writer, path)?;
+        write_store_path(writer, &derivation.store_dir, path)?;
         writer.write_all(b",")?;
         write_input_derivation(writer, input)?;
         writer.write_all(b")")?;
@@ -172,6 +176,7 @@ fn write_input_derivation(
 
 fn write_store_paths<'a>(
     writer: &mut (impl Write + ?Sized),
+    store_dir: &crate::StoreDir,
     paths: impl Iterator<Item = &'a StorePath>,
 ) -> io::Result<()> {
     writer.write_all(b"[")?;
@@ -179,7 +184,7 @@ fn write_store_paths<'a>(
         if index != 0 {
             writer.write_all(b",")?;
         }
-        write_store_path(writer, path)?;
+        write_store_path(writer, store_dir, path)?;
     }
     writer.write_all(b"]")
 }
@@ -257,15 +262,15 @@ impl AtermForm for FullAterm {
     ) -> io::Result<()> {
         match output {
             Output::InputAddressed { path } => {
-                write_store_path(writer, path)?;
+                write_store_path(writer, &derivation.store_dir, path)?;
                 writer.write_all(b",\"\",\"\"")
             }
             Output::Fixed { ca } => {
                 let path = output
-                    .path(&derivation.name, name)
+                    .path_in(&derivation.store_dir, &derivation.name, name)
                     .expect("validated fixed output path")
                     .expect("fixed outputs have paths");
-                write_store_path(writer, &path)?;
+                write_store_path(writer, &derivation.store_dir, &path)?;
                 writer.write_all(b",")?;
                 let (method, hash) = fixed_parts(ca);
                 write_unquoted(writer, method.as_bytes())?;
@@ -319,7 +324,7 @@ impl AtermForm for InputModuloAterm<'_> {
 
     fn write_output(
         &self,
-        _derivation: &Derivation,
+        derivation: &Derivation,
         writer: &mut (impl Write + ?Sized),
         _name: &str,
         output: &Output,
@@ -327,7 +332,7 @@ impl AtermForm for InputModuloAterm<'_> {
         let Output::InputAddressed { path } = output else {
             unreachable!("input modulo accepts only input-addressed outputs")
         };
-        write_store_path(writer, path)?;
+        write_store_path(writer, &derivation.store_dir, path)?;
         writer.write_all(b",\"\",\"\"")
     }
 
@@ -416,6 +421,11 @@ fn write_unquoted_string_list<'a>(
 
 fn write_escaped(writer: &mut (impl Write + ?Sized), value: &[u8]) -> io::Result<()> {
     writer.write_all(b"\"")?;
+    write_escaped_fragment(writer, value)?;
+    writer.write_all(b"\"")
+}
+
+fn write_escaped_fragment(writer: &mut (impl Write + ?Sized), value: &[u8]) -> io::Result<()> {
     if memchr2(b'\r', b'\t', value).is_none() {
         let mut start = 0;
         for index in memchr3_iter(b'"', b'\\', b'\n', value) {
@@ -428,8 +438,7 @@ fn write_escaped(writer: &mut (impl Write + ?Sized), value: &[u8]) -> io::Result
             })?;
             start = index + 1;
         }
-        writer.write_all(&value[start..])?;
-        return writer.write_all(b"\"");
+        return writer.write_all(&value[start..]);
     }
 
     let mut start = 0;
@@ -448,12 +457,19 @@ fn write_escaped(writer: &mut (impl Write + ?Sized), value: &[u8]) -> io::Result
             start = index + 1;
         }
     }
-    writer.write_all(&value[start..])?;
-    writer.write_all(b"\"")
+    writer.write_all(&value[start..])
 }
 
-fn write_store_path(writer: &mut (impl Write + ?Sized), path: &StorePath) -> io::Result<()> {
-    writer.write_all(b"\"/nix/store/")?;
+fn write_store_path(
+    writer: &mut (impl Write + ?Sized),
+    store_dir: &crate::StoreDir,
+    path: &StorePath,
+) -> io::Result<()> {
+    writer.write_all(b"\"")?;
+    write_escaped_fragment(writer, store_dir.as_str().as_bytes())?;
+    if store_dir.as_str() != "/" {
+        writer.write_all(b"/")?;
+    }
     writer.write_all(&nixbase32::encode_fixed::<32>(path.digest()))?;
     writer.write_all(b"-")?;
     writer.write_all(path.name().as_bytes())?;

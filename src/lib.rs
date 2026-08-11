@@ -40,7 +40,7 @@ mod write;
 
 pub use builder::{DerivationBuilder, ValidatedDerivation};
 pub use hash::{CAHash, ContentAddressMethod, HashAlgorithm, NixHash};
-pub use store_path::StorePath;
+pub use store_path::{StoreDir, StorePath};
 pub use structured_attrs::{StructuredAttrs, StructuredAttrsFiles};
 
 #[cfg(test)]
@@ -306,11 +306,21 @@ impl Output {
         derivation_name: &str,
         output_name: &str,
     ) -> Result<Option<StorePath>, Error> {
+        self.path_in(&StoreDir::default(), derivation_name, output_name)
+    }
+
+    /// The path known before building, using the configured logical store.
+    pub fn path_in(
+        &self,
+        store_dir: &StoreDir,
+        derivation_name: &str,
+        output_name: &str,
+    ) -> Result<Option<StorePath>, Error> {
         match self {
             Self::InputAddressed { path } => Ok(Some(path.clone())),
             Self::Fixed { ca } => {
                 let name = store_path::output_path_name(derivation_name, output_name)?;
-                Ok(Some(store_path::build_ca_path(
+                Ok(Some(store_dir.build_ca_path(
                     &name,
                     ca,
                     std::iter::empty::<&StorePath>(),
@@ -489,6 +499,7 @@ impl<'a> Iterator for InputDerivationWalk<'a> {
 /// One parsed `Derive(...)` or `DrvWithVersion("xp-dyn-drv",...)` value.
 #[derive(Debug, Clone)]
 pub struct Derivation {
+    store_dir: StoreDir,
     name: String,
     outputs: BTreeMap<String, Output>,
     input_derivations: BTreeMap<StorePath, InputDerivation>,
@@ -503,7 +514,8 @@ pub struct Derivation {
 
 impl PartialEq for Derivation {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
+        self.store_dir == other.store_dir
+            && self.name == other.name
             && self.outputs == other.outputs
             && self.input_derivations == other.input_derivations
             && self.input_sources == other.input_sources
@@ -521,7 +533,16 @@ impl Derivation {
     /// Parse one derivation ATerm. `name` is carried out of band by Nix and
     /// excludes the `.drv` suffix.
     pub fn from_aterm_bytes(bytes: &[u8], name: &str) -> Result<Self, Error> {
-        parser::parse(bytes, name)
+        Self::from_aterm_bytes_in(bytes, name, StoreDir::default())
+    }
+
+    /// Parse one derivation ATerm using a configured logical store directory.
+    pub fn from_aterm_bytes_in(
+        bytes: &[u8],
+        name: &str,
+        store_dir: StoreDir,
+    ) -> Result<Self, Error> {
+        parser::parse(bytes, name, store_dir)
     }
 
     /// Consume this value for editing. [`DerivationBuilder::build`] validates
@@ -575,6 +596,12 @@ impl Derivation {
         &self.name
     }
 
+    /// Return the logical store directory used by this derivation.
+    #[must_use]
+    pub fn store_dir(&self) -> &StoreDir {
+        &self.store_dir
+    }
+
     /// Outputs in their lossless `ATerm` representation.
     #[must_use]
     pub fn outputs(&self) -> &BTreeMap<String, Output> {
@@ -616,7 +643,7 @@ impl Derivation {
                 Ok((
                     name.clone(),
                     DerivationOutput {
-                        path: output.path(&self.name, name)?,
+                        path: output.path_in(&self.store_dir, &self.name, name)?,
                         ca_hash: output.fixed_content_address().cloned(),
                     },
                 ))
@@ -661,10 +688,12 @@ impl Derivation {
                     unreachable!("output_type checked fixed outputs")
                 };
                 let path = output
-                    .path(&self.name, "out")?
+                    .path_in(&self.store_dir, &self.name, "out")?
                     .expect("fixed output has a path");
                 return Ok(InputDerivationHash::fixed_output(fixed_output_hash(
-                    ca, &path,
+                    &self.store_dir,
+                    ca,
+                    &path,
                 )));
             }
             OutputType::InputAddressed => {}
@@ -765,7 +794,7 @@ impl Derivation {
                         if output != "out" {
                             return Err(Error::InvalidDerivation(format!(
                                 "fixed-output input derivation {} cannot provide requested output {output:?}",
-                                path.to_absolute_path()
+                                path.to_absolute_path_in(&self.store_dir)
                             ))
                             .into());
                         }
@@ -781,7 +810,7 @@ impl Derivation {
     /// Calculate this derivation's own `.drv` store path.
     pub fn drv_path(&self) -> Result<StorePath, Error> {
         let bytes = self.to_aterm_bytes();
-        Ok(store_path::build_text_path(
+        Ok(self.store_dir.build_text_path(
             &format!("{}.drv", self.name),
             &bytes,
             self.input_derivations
@@ -868,7 +897,7 @@ impl Derivation {
         for (output_name, output) in &self.outputs {
             validate_output_name(output_name)?;
             if matches!(output, Output::Fixed { .. }) {
-                output.path(&self.name, output_name)?;
+                output.path_in(&self.store_dir, &self.name, output_name)?;
             }
         }
 
@@ -876,10 +905,10 @@ impl Derivation {
             if !path.is_derivation() {
                 return Err(Error::InvalidDerivation(format!(
                     "input path {} does not name a .drv file",
-                    path.to_absolute_path()
+                    path.to_absolute_path_in(&self.store_dir)
                 )));
             }
-            validate_input_node(path, input)?;
+            validate_input_node(&self.store_dir, path, input)?;
         }
 
         if self.system.is_empty() {
@@ -943,7 +972,7 @@ impl Derivation {
                     .map(|name| {
                         Ok((
                             name.clone(),
-                            store_path::build_output_path(hash, name, &self.name)?,
+                            self.store_dir.build_output_path(hash, name, &self.name)?,
                         ))
                     })
                     .collect::<Result<_, Error>>()
@@ -956,7 +985,7 @@ impl Derivation {
                     Ok((
                         name.clone(),
                         output
-                            .path(&self.name, name)?
+                            .path_in(&self.store_dir, &self.name, name)?
                             .expect("fixed outputs always have a path"),
                     ))
                 })
@@ -982,13 +1011,13 @@ impl Derivation {
             {
                 return Err(Error::InvalidDerivation(format!(
                     "output {name:?} has path {}, expected {}",
-                    path.to_absolute_path(),
-                    expected.to_absolute_path()
+                    path.to_absolute_path_in(&self.store_dir),
+                    expected.to_absolute_path_in(&self.store_dir)
                 ))
                 .into());
             }
 
-            let expected = expected.to_absolute_path();
+            let expected = expected.to_absolute_path_in(&self.store_dir);
             match self.environment.get(&name) {
                 None => {
                     return Err(Error::InvalidDerivation(format!(
@@ -1043,7 +1072,7 @@ impl Derivation {
                 }
             }
             self.environment
-                .insert(name, path.to_absolute_path().into_bytes());
+                .insert(name, path.to_absolute_path_in(&self.store_dir).into_bytes());
         }
         Ok(())
     }
@@ -1088,15 +1117,21 @@ impl Derivation {
             .outputs
             .iter()
             .map(|(name, output)| {
-                let path = output.path(&self.name, name)?.ok_or_else(|| {
-                    Error::StructuredAttrs(format!(
-                        "output {name:?} has no known path; provide its scratch path explicitly"
-                    ))
-                })?;
+                let path = output
+                    .path_in(&self.store_dir, &self.name, name)?
+                    .ok_or_else(|| {
+                        Error::StructuredAttrs(format!(
+                            "output {name:?} has no known path; provide its scratch path explicitly"
+                        ))
+                    })?;
                 Ok((name.clone(), path))
             })
             .collect::<Result<BTreeMap<_, _>, Error>>()?;
-        Ok(Some(structured_attrs::files(attrs, &output_paths)?))
+        Ok(Some(structured_attrs::files(
+            attrs,
+            &self.store_dir,
+            &output_paths,
+        )?))
     }
 
     /// Materialize structured-attribute files using the builder's output paths.
@@ -1117,7 +1152,11 @@ impl Derivation {
                 "concrete output paths do not match the derivation outputs".to_owned(),
             ));
         }
-        Ok(Some(structured_attrs::files(attrs, output_paths)?))
+        Ok(Some(structured_attrs::files(
+            attrs,
+            &self.store_dir,
+            output_paths,
+        )?))
     }
 }
 
@@ -1177,26 +1216,30 @@ fn validate_output_name(name: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate_input_node(path: &StorePath, input: &InputDerivation) -> Result<(), Error> {
+fn validate_input_node(
+    store_dir: &StoreDir,
+    path: &StorePath,
+    input: &InputDerivation,
+) -> Result<(), Error> {
     for node in input.walk() {
         if node.depth() > MAX_DYNAMIC_INPUT_DEPTH {
             return Err(Error::InvalidDerivation(format!(
                 "input derivation {} exceeds {MAX_DYNAMIC_INPUT_DEPTH} dynamic levels",
-                path.to_absolute_path()
+                path.to_absolute_path_in(store_dir)
             )));
         }
         let input = node.input();
         if input.outputs.is_empty() && input.dynamic_outputs.is_empty() {
             return Err(Error::InvalidDerivation(format!(
                 "input derivation {} requests no outputs",
-                path.to_absolute_path()
+                path.to_absolute_path_in(store_dir)
             )));
         }
         for name in &input.outputs {
             validate_output_name(name).map_err(|_| {
                 Error::InvalidDerivation(format!(
                     "input derivation {} has invalid requested output {name:?}",
-                    path.to_absolute_path()
+                    path.to_absolute_path_in(store_dir)
                 ))
             })?;
         }
@@ -1204,7 +1247,7 @@ fn validate_input_node(path: &StorePath, input: &InputDerivation) -> Result<(), 
             validate_output_name(name).map_err(|_| {
                 Error::InvalidDerivation(format!(
                     "input derivation {} has invalid dynamic output {name:?}",
-                    path.to_absolute_path()
+                    path.to_absolute_path_in(store_dir)
                 ))
             })?;
         }
@@ -1212,7 +1255,7 @@ fn validate_input_node(path: &StorePath, input: &InputDerivation) -> Result<(), 
     Ok(())
 }
 
-fn fixed_output_hash(ca: &CAHash, path: &StorePath) -> DerivationModuloHash {
+fn fixed_output_hash(store_dir: &StoreDir, ca: &CAHash, path: &StorePath) -> DerivationModuloHash {
     let (method_prefix, hash): (&str, NixHash) = match ca {
         CAHash::Flat(hash) => ("", hash.clone()),
         CAHash::Nar(hash) => ("r:", hash.clone()),
@@ -1226,7 +1269,7 @@ fn fixed_output_hash(ca: &CAHash, path: &StorePath) -> DerivationModuloHash {
     digest.update(b":");
     update_hex(&mut digest, hash.digest_as_bytes());
     digest.update(b":");
-    digest.update(path.to_absolute_path().as_bytes());
+    digest.update(path.to_absolute_path_in(store_dir).as_bytes());
     DerivationModuloHash::new(digest.finalize().into())
 }
 
