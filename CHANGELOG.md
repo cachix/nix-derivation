@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Added
+
+- Add `store_path::downstream_placeholder`, a typed, validated implementation
+  of Nix 2.35 downstream dynamic-output placeholders.
+
 ## [0.3.0] - 2026-08-11
 
 ### Added

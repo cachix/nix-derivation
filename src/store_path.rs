@@ -52,6 +52,18 @@ pub enum Error {
     /// Text content addresses cannot refer to their own result.
     #[error("text content addressing does not allow a self reference")]
     TextSelfReference,
+    /// A downstream dynamic-output placeholder did not name an output edge.
+    #[error("a downstream placeholder needs at least one output")]
+    EmptyDownstreamOutputChain,
+    /// A downstream dynamic-output placeholder did not start from a derivation.
+    #[error("downstream placeholder base {path} does not name a derivation")]
+    NotADerivation {
+        /// Store path supplied as the downstream placeholder's base.
+        path: StorePath,
+    },
+    /// A downstream dynamic-output placeholder used an invalid output name.
+    #[error("invalid output name {0:?}")]
+    InvalidOutputName(String),
 }
 
 /// A logical Nix store directory used for path parsing, rendering, and hashing.
@@ -388,6 +400,71 @@ pub fn hash_placeholder(output_name: &str) -> String {
     format!("/{}", nixbase32::encode(&digest))
 }
 
+/// Return Nix's placeholder for an output reached through dynamic derivations.
+///
+/// `base` is the store path of the derivation where the chain begins and
+/// `output_names` names its requested output followed by every dynamically
+/// produced derivation output. The chain must be non-empty, every name must be
+/// a valid Nix output name, and `base` must end in `.drv`.
+///
+/// The returned absolute-looking value is a placeholder, not a store path. It
+/// starts with `/` and contains the 32-byte Nix-base32 SHA-256 digest used by
+/// Nix 2.35 while resolving `xp-dyn-drv` inputs. It is independent of the
+/// configured logical store directory.
+pub fn downstream_placeholder<I, S>(base: &StorePath, output_names: I) -> Result<String, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut output_names = output_names.into_iter();
+    let first = output_names
+        .next()
+        .ok_or(Error::EmptyDownstreamOutputChain)?;
+    let first = first.as_ref();
+    validate_output_name(first)?;
+
+    let drv_name = base
+        .name()
+        .strip_suffix(".drv")
+        .ok_or_else(|| Error::NotADerivation { path: base.clone() })?;
+    let output_path_name = output_path_name(drv_name, first)?;
+    let upstream_clear = format!(
+        "nix-upstream-output:{}:{output_path_name}",
+        nixbase32::encode(base.digest())
+    );
+    let mut digest: [u8; 32] = Sha256::digest(upstream_clear.as_bytes()).into();
+
+    for output_name in output_names {
+        let output_name = output_name.as_ref();
+        validate_output_name(output_name)?;
+        digest = downstream_placeholder_digest(digest, output_name);
+    }
+
+    Ok(format!("/{}", nixbase32::encode(&digest)))
+}
+
+fn validate_output_name(name: &str) -> Result<(), Error> {
+    if name == "drv" || validate_name(name).is_err() {
+        Err(Error::InvalidOutputName(name.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
+fn downstream_placeholder_digest(previous: [u8; 32], output_name: &str) -> [u8; 32] {
+    // Nix's `compressHash` XOR-folds the full SHA-256 into store-path width
+    // before using it as the identity of the dynamically generated derivation.
+    let mut compressed = [0_u8; DIGEST_LEN];
+    for (index, byte) in previous.into_iter().enumerate() {
+        compressed[index % compressed.len()] ^= byte;
+    }
+    let clear = format!(
+        "nix-computed-output:{}:{output_name}",
+        nixbase32::encode(&compressed)
+    );
+    Sha256::digest(clear.as_bytes()).into()
+}
+
 fn make_store_path(
     store_dir: &StoreDir,
     ty: &str,
@@ -566,6 +643,55 @@ mod tests {
         assert_eq!(
             hash_placeholder("out"),
             "/1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9"
+        );
+    }
+
+    #[test]
+    fn downstream_placeholders_match_nix_2_35() {
+        let base = StorePath::from_basename(b"g1w7hy3qg1w7hy3qg1w7hy3qg1w7hy3q-foo.drv").unwrap();
+        assert_eq!(
+            downstream_placeholder(&base, ["out"]).unwrap(),
+            "/0c6rn30q4frawknapgwq386zq358m8r6msvywcvc89n6m5p2dgbz"
+        );
+
+        let nested =
+            StorePath::from_basename(b"g1w7hy3qg1w7hy3qg1w7hy3qg1w7hy3q-foo.drv.drv").unwrap();
+        let output_names = vec!["out".to_owned(), "out".to_owned()];
+        assert_eq!(
+            downstream_placeholder(&nested, output_names).unwrap(),
+            "/0gn6agqxjyyalf0dpihgyf49xq5hqxgw100f0wydnj6yqrhqsb3w"
+        );
+
+        assert_eq!(
+            downstream_placeholder(&nested, std::iter::repeat_n("out", 1_024))
+                .unwrap()
+                .len(),
+            53
+        );
+    }
+
+    #[test]
+    fn downstream_placeholders_reject_invalid_inputs() {
+        let derivation = StorePath::from_parts([0; DIGEST_LEN], "example.drv").unwrap();
+        assert_eq!(
+            downstream_placeholder(&derivation, Vec::<&str>::new()),
+            Err(Error::EmptyDownstreamOutputChain)
+        );
+        assert_eq!(
+            downstream_placeholder(&derivation, ["bad output"]),
+            Err(Error::InvalidOutputName("bad output".to_owned()))
+        );
+        assert_eq!(
+            downstream_placeholder(&derivation, ["drv"]),
+            Err(Error::InvalidOutputName("drv".to_owned()))
+        );
+
+        let non_derivation = StorePath::from_parts([0; DIGEST_LEN], "not-a-drv").unwrap();
+        assert_eq!(
+            downstream_placeholder(&non_derivation, ["out"]),
+            Err(Error::NotADerivation {
+                path: non_derivation,
+            })
         );
     }
 
