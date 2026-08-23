@@ -2,12 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## [0.4.0] - 2026-08-23
 
 ### Added
 
 - Add `store_path::downstream_placeholder`, a typed, validated implementation
   of Nix 2.35 downstream dynamic-output placeholders.
+- Add `ValidatedDerivation` queries for dynamic-derivation participation,
+  required system features, and `exportReferencesGraph` declarations.
+- Add typed dynamic-input resolution APIs that reproduce Nix's pure rewrite
+  step across builders, arguments, environment keys and values, and structured
+  attributes.
 
 ## [0.3.0] - 2026-08-11
 
@@ -74,6 +79,7 @@ All notable changes to this project are documented in this file.
 
 - Initial release.
 
+[0.4.0]: https://github.com/cachix/nix-derivation/releases/tag/0.4.0
 [0.3.0]: https://github.com/cachix/nix-derivation/releases/tag/0.3.0
 [0.2.0]: https://github.com/cachix/nix-derivation/releases/tag/0.2.0
 [0.1.0]: https://crates.io/crates/nix-derivation/0.1.0

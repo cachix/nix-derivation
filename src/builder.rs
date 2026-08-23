@@ -529,12 +529,20 @@ impl ValidatedDerivation {
         let mut builder = self.into_builder();
         builder.input_derivations_mut().clear();
         builder.input_sources_mut().extend(resolution.input_sources);
+        let rewritten_builder = replace_string(builder.builder(), &rewrites);
+        *builder.builder_mut() = rewritten_builder;
         for argument in builder.arguments_mut() {
             *argument = replace_string(argument, &rewrites);
         }
-        for value in builder.environment_mut().values_mut() {
-            *value = replace_bytes(value, &rewrites);
-        }
+        let environment = std::mem::take(builder.environment_mut());
+        builder
+            .environment_mut()
+            .extend(environment.into_iter().map(|(key, value)| {
+                (
+                    replace_string(&key, &rewrites),
+                    replace_bytes(&value, &rewrites),
+                )
+            }));
         if let Some(attrs) = builder.structured_attrs_mut().take() {
             let json = replace_bytes(attrs.canonical_json(), &rewrites);
             *builder.structured_attrs_mut() = Some(StructuredAttrs::from_json_bytes(json)?);

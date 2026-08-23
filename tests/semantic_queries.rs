@@ -172,6 +172,13 @@ fn dynamic_input_resolution_rewrites_single_and_recursive_chains() {
         binary,
         Some(StructuredAttrs::from_json_bytes(json).unwrap()),
     );
+    let mut consumer_builder = consumer.into_builder();
+    *consumer_builder.builder_mut() = format!("{direct_placeholder}/bin/builder");
+    consumer_builder.environment_mut().insert(
+        format!("dynamic-{direct_placeholder}"),
+        generated_placeholder.as_bytes().to_vec(),
+    );
+    let consumer = consumer_builder.build().unwrap();
 
     let resolved = consumer
         .resolve_dynamic_inputs(DynamicInputResolution {
@@ -218,6 +225,11 @@ fn dynamic_input_resolution_rewrites_single_and_recursive_chains() {
             format!("generated={GENERATED_DRV}"),
             format!("leaf={LEAF_PATH}"),
         ]
+    );
+    assert_eq!(resolved.builder(), format!("{LEAF_PATH}/bin/builder"));
+    assert_eq!(
+        resolved.environment()[&format!("dynamic-{LEAF_PATH}")],
+        GENERATED_DRV.as_bytes()
     );
     let binary = &resolved.environment()["binary"];
     assert_eq!(&binary[..2], &[0xff, 0x00]);
