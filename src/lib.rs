@@ -38,7 +38,10 @@ pub mod store_path;
 pub mod structured_attrs;
 mod write;
 
-pub use builder::{DerivationBuilder, ValidatedDerivation};
+pub use builder::{
+    DerivationBuilder, DynamicInputResolution, DynamicOutputReplacement, ExportReferencesGraph,
+    ValidatedDerivation,
+};
 pub use hash::{CAHash, ContentAddressMethod, HashAlgorithm, NixHash};
 pub use store_path::{StoreDir, StorePath};
 pub use structured_attrs::{StructuredAttrs, StructuredAttrsFiles};

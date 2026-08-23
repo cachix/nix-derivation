@@ -2,9 +2,38 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 use crate::{
-    Derivation, DerivationOutput, Error, InputDerivation, Output, StoreDir, StorePath,
-    StructuredAttrs,
+    CAHash, ContentAddressMethod, Derivation, DerivationOutput, Error, InputDerivation, Output,
+    StoreDir, StorePath, StructuredAttrs, store_path,
 };
+
+/// One realised output in a dynamic derivation input chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DynamicOutputReplacement {
+    /// Input derivation where the dynamic output chain begins.
+    pub base_derivation: StorePath,
+    /// Output names followed from the base derivation to the realised output.
+    pub output_chain: Vec<String>,
+    /// Concrete store path produced by the final output in the chain.
+    pub realised_path: StorePath,
+}
+
+/// Store-independent facts needed to resolve all dynamic derivation inputs.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DynamicInputResolution {
+    /// Placeholder-to-path replacements for realised outputs in dynamic chains.
+    pub replacements: Vec<DynamicOutputReplacement>,
+    /// Realised leaf outputs that become direct source inputs.
+    pub input_sources: BTreeSet<StorePath>,
+}
+
+/// One ordinary `exportReferencesGraph` declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExportReferencesGraph {
+    /// File to create in the build directory.
+    pub file_name: String,
+    /// Root store path whose reference graph is exported.
+    pub root: StorePath,
+}
 
 /// Construct or edit a derivation, validating all invariants at the end.
 #[derive(Debug, Clone)]
@@ -420,6 +449,134 @@ impl ValidatedDerivation {
             .expect("validated derivation has one consistent output type")
     }
 
+    /// Whether this derivation participates in dynamic derivation resolution.
+    #[must_use]
+    pub fn uses_dynamic_derivations(&self) -> bool {
+        self.0
+            .input_derivations
+            .values()
+            .any(InputDerivation::is_dynamic)
+            || self.0.outputs.iter().any(|(name, output)| match output {
+                Output::Floating {
+                    method: ContentAddressMethod::Text,
+                    ..
+                } => true,
+                Output::Fixed {
+                    ca: CAHash::Text(_),
+                } => output
+                    .path_in(&self.0.store_dir, &self.0.name, name)
+                    .expect("validated fixed output has a valid path")
+                    .is_some_and(|path| path.is_derivation()),
+                _ => false,
+            })
+    }
+
+    /// Return all explicitly requested Nix system features in sorted order.
+    #[must_use]
+    pub fn required_system_features(&self) -> BTreeSet<String> {
+        let mut features = BTreeSet::new();
+        if let Some(value) = self.0.environment.get("requiredSystemFeatures") {
+            features.extend(
+                String::from_utf8_lossy(value)
+                    .split([' ', '\t', '\n', '\r'])
+                    .filter(|feature| !feature.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        if let Some(values) = self
+            .0
+            .structured_attrs
+            .as_ref()
+            .and_then(|attrs| attrs.get("requiredSystemFeatures"))
+            .and_then(serde_json::Value::as_array)
+        {
+            features.extend(
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
+        features
+    }
+
+    /// Resolve dynamic input placeholders using already-realised store paths.
+    ///
+    /// This performs only the pure rewrite step. Building input derivations,
+    /// loading generated `.drv` files, and deciding which paths are realised
+    /// leaves remain the caller's responsibility.
+    pub fn resolve_dynamic_inputs(
+        self,
+        resolution: DynamicInputResolution,
+    ) -> Result<ValidatedDerivation, Error> {
+        let store_dir = self.0.store_dir.clone();
+        let mut rewrites = BTreeMap::new();
+        for replacement in resolution.replacements {
+            let placeholder = store_path::downstream_placeholder(
+                &replacement.base_derivation,
+                &replacement.output_chain,
+            )?;
+            let realised_path = replacement.realised_path.to_absolute_path_in(&store_dir);
+            if let Some(previous) = rewrites.insert(placeholder.clone(), realised_path.clone())
+                && previous != realised_path
+            {
+                return Err(Error::InvalidDerivation(format!(
+                    "conflicting dynamic input resolutions for placeholder {placeholder}"
+                )));
+            }
+        }
+
+        let mut builder = self.into_builder();
+        builder.input_derivations_mut().clear();
+        builder.input_sources_mut().extend(resolution.input_sources);
+        for argument in builder.arguments_mut() {
+            *argument = replace_string(argument, &rewrites);
+        }
+        for value in builder.environment_mut().values_mut() {
+            *value = replace_bytes(value, &rewrites);
+        }
+        if let Some(attrs) = builder.structured_attrs_mut().take() {
+            let json = replace_bytes(attrs.canonical_json(), &rewrites);
+            *builder.structured_attrs_mut() = Some(StructuredAttrs::from_json_bytes(json)?);
+        }
+        builder.build()
+    }
+
+    /// Parse the ordinary `exportReferencesGraph` environment option.
+    pub fn export_references_graph(&self) -> Result<Vec<ExportReferencesGraph>, Error> {
+        let Some(value) = self.0.environment.get("exportReferencesGraph") else {
+            return Ok(Vec::new());
+        };
+        let value = std::str::from_utf8(value).map_err(|_| Error::InvalidUtf8 {
+            field: "exportReferencesGraph",
+        })?;
+        let tokens: Vec<_> = value
+            .split([' ', '\t', '\n', '\r'])
+            .filter(|token| !token.is_empty())
+            .collect();
+        if !tokens.len().is_multiple_of(2) {
+            return Err(Error::InvalidDerivation(format!(
+                "odd number of tokens in exportReferencesGraph: {value:?}"
+            )));
+        }
+
+        tokens
+            .chunks_exact(2)
+            .map(|pair| {
+                let file_name = pair[0];
+                if !valid_export_references_graph_file_name(file_name) {
+                    return Err(Error::InvalidDerivation(format!(
+                        "invalid file name {file_name:?} in exportReferencesGraph"
+                    )));
+                }
+                Ok(ExportReferencesGraph {
+                    file_name: file_name.to_owned(),
+                    root: self.0.store_dir.parse_path(pair[1].as_bytes())?,
+                })
+            })
+            .collect()
+    }
+
     /// Calculate this derivation's own `.drv` store path.
     #[must_use]
     pub fn drv_path(&self) -> StorePath {
@@ -427,6 +584,37 @@ impl ValidatedDerivation {
             .drv_path()
             .expect("validated derivation has a valid .drv store-path name")
     }
+}
+
+fn replace_string(value: &str, rewrites: &BTreeMap<String, String>) -> String {
+    rewrites.iter().fold(value.to_owned(), |value, (from, to)| {
+        value.replace(from, to)
+    })
+}
+
+fn replace_bytes(value: &[u8], rewrites: &BTreeMap<String, String>) -> Vec<u8> {
+    rewrites.iter().fold(value.to_vec(), |value, (from, to)| {
+        replace_one_bytes(&value, from.as_bytes(), to.as_bytes())
+    })
+}
+
+fn replace_one_bytes(value: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    debug_assert!(!from.is_empty());
+    let mut replaced = Vec::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(position) = rest.windows(from.len()).position(|window| window == from) {
+        replaced.extend_from_slice(&rest[..position]);
+        replaced.extend_from_slice(to);
+        rest = &rest[position + from.len()..];
+    }
+    replaced.extend_from_slice(rest);
+    replaced
+}
+
+fn valid_export_references_graph_file_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(byte) if byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
 }
 
 impl TryFrom<Derivation> for ValidatedDerivation {
