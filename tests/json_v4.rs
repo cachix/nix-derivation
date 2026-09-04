@@ -22,6 +22,24 @@ const SIMPLE: &str = r#"
 }
 "#;
 
+// Captured from `nix derivation show` with Nix 2.34.8.
+const NIX_GENERATED_INPUT_ADDRESSED: &[u8] =
+    include_bytes!("fixtures/json-v4/input-addressed.json");
+const NIX_GENERATED_FIXED_OUTPUT: &[u8] = include_bytes!("fixtures/json-v4/fixed-output.json");
+
+#[test]
+fn nix_generated_fixtures_round_trip() {
+    for fixture in [NIX_GENERATED_INPUT_ADDRESSED, NIX_GENERATED_FIXED_OUTPUT] {
+        let expected: Value = serde_json::from_slice(fixture).unwrap();
+        let derivation = json::from_slice(fixture).unwrap();
+        assert_eq!(json::to_value(&derivation).unwrap(), expected);
+        assert_eq!(
+            json::from_slice(&derivation.to_json_bytes().unwrap()).unwrap(),
+            derivation
+        );
+    }
+}
+
 #[test]
 fn simple_nix_fixture_round_trips() {
     let derivation = Derivation::from_json_bytes(SIMPLE.as_bytes()).unwrap();
@@ -150,6 +168,10 @@ fn every_output_shape_matches_nix_json() {
             "text": {
                 "hash": "sha256-iUUXyRY8iW7DGirb0zwGgf1fRbLA7wimTJKgP7l/OQ8=",
                 "method": "text"
+            },
+            "blake3": {
+                "hash": "blake3-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "method": "nar"
             },
             "floating": {"hashAlgo": "sha256", "method": "nar"},
             "deferred": {},
@@ -292,6 +314,90 @@ fn fixed_output_hashes_must_use_sri_encoding() {
             Err(Error::InvalidHash(_))
         ));
     }
+}
+
+#[test]
+fn malformed_required_fields_and_output_shapes_are_rejected() {
+    let base: Value = serde_json::from_str(SIMPLE).unwrap();
+
+    for field in [
+        "version", "name", "outputs", "inputs", "system", "builder", "args", "env",
+    ] {
+        let mut encoded = base.clone();
+        encoded.as_object_mut().unwrap().remove(field);
+        assert!(
+            json::from_slice(&serde_json::to_vec(&encoded).unwrap()).is_err(),
+            "missing field {field:?} was accepted"
+        );
+    }
+
+    for (field, invalid) in [
+        ("version", json!("4")),
+        ("name", json!(4)),
+        ("outputs", json!([])),
+        ("inputs", json!([])),
+        ("system", json!(null)),
+        ("builder", json!([])),
+        ("args", json!([1])),
+        ("env", json!({"key": 1})),
+    ] {
+        let mut encoded = base.clone();
+        encoded[field] = invalid;
+        assert!(
+            json::from_slice(&serde_json::to_vec(&encoded).unwrap()).is_err(),
+            "invalid field {field:?} was accepted"
+        );
+    }
+
+    let invalid_outputs = [
+        json!({"path": 1}),
+        json!({"hash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}),
+        json!({"hash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "method": "unknown"}),
+        json!({"hashAlgo": "unknown", "method": "nar"}),
+        json!({"hashAlgo": "sha256", "method": "nar", "extra": true}),
+        json!({"impure": true, "hashAlgo": "sha256"}),
+    ];
+    for output in invalid_outputs {
+        let mut encoded = base.clone();
+        encoded["outputs"]["out"] = output.clone();
+        assert!(
+            json::from_slice(&serde_json::to_vec(&encoded).unwrap()).is_err(),
+            "invalid output {output} was accepted"
+        );
+    }
+
+    for missing in ["outputs", "dynamicOutputs"] {
+        let mut encoded = base.clone();
+        encoded["inputs"]["drvs"]["c015dhfh5l0lp6wxyvdn7bmwhbbr6hr9-dep2.drv"]
+            .as_object_mut()
+            .unwrap()
+            .remove(missing);
+        assert!(
+            json::from_slice(&serde_json::to_vec(&encoded).unwrap()).is_err(),
+            "input derivation missing {missing:?} was accepted"
+        );
+    }
+
+    for malformed in [b"null".as_slice(), b"[]", b"{}", b"{", b"{} null"] {
+        assert!(
+            json::from_slice(malformed).is_err(),
+            "malformed top-level JSON was accepted: {}",
+            String::from_utf8_lossy(malformed)
+        );
+    }
+}
+
+#[test]
+fn impure_marker_matches_nix_presence_semantics() {
+    let mut encoded: Value = serde_json::from_str(SIMPLE).unwrap();
+    encoded["outputs"]["out"] = json!({"hashAlgo": "sha256", "impure": false, "method": "nar"});
+
+    let derivation = json::from_slice(&serde_json::to_vec(&encoded).unwrap()).unwrap();
+    assert!(matches!(derivation.outputs()["out"], Output::Impure { .. }));
+    assert_eq!(
+        json::to_value(&derivation).unwrap()["outputs"]["out"]["impure"],
+        true
+    );
 }
 
 #[test]

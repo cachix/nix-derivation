@@ -13,7 +13,7 @@ or C++ runtime, and all its dependencies are published Rust crates.
 | Parsing | Reads derivations as bytes, requires all input to be consumed, validates UTF-8 in text fields, and handles each field's Nix escaping rules. Environment values may contain arbitrary bytes. Duplicate map and set entries behave like they do in Nix. |
 | Serialization | Writes fields in Nix's canonical order, sorts maps and sets, applies Nix escaping, uses traditional syntax when no versioned node is needed, and can stream output through `std::io::Write`. |
 | Outputs | Input-addressed, fixed content-addressed, floating content-addressed, deferred, and impure outputs. Multi-output derivations and output placeholders are supported. |
-| Content addresses | Supports the flat, NAR, text, and Git ways of hashing content. MD5, SHA-1, SHA-256, and SHA-512 values have their lengths checked by Rust's type system; Nix's restrictions on text and Git algorithms are also checked. |
+| Content addresses | Supports the flat, NAR, text, and Git ways of hashing content. BLAKE3, MD5, SHA-1, SHA-256, and SHA-512 values have their lengths checked by Rust's type system; Nix's restrictions on text and Git algorithms are also checked. |
 | Inputs | Input sources, requested outputs from input derivations, and nested trees of dynamic outputs. Trees can be constructed, traversed without recursion with `walk()`, and measured with `max_depth()`. Parsing and construction enforce a depth limit of 256. |
 | Derived paths | Typed `DrvOutput` identities plus `SingleDerivedPath` and `DerivedPath` expressions, including dynamic-output chains, store-aware parsing, canonical text and Nix-compatible JSON rendering, and legacy `!` separators. |
 | Structured attributes | Reads `__json` as a JSON object supported by Nix while preserving its original bytes. Provides type-checked lookup and iteration, produces Nix-compatible canonical JSON (including float formatting), and generates `.attrs.json` and `.attrs.sh` files with concrete output paths for the builder. |
@@ -69,6 +69,10 @@ size-limited pseudo-random inputs, and known expected hashes, nixbase32
 encodings, placeholders, and store paths. After
 parsing and serializing, every Nix-generated test case must reproduce its
 original canonical bytes and match Nix's validation, path, and hash results.
+The derivation JSON suite also contains frozen Nix 2.34 fixtures. When Nix is
+available, a live differential test parses Nix's version 4 JSON, requires an
+exact value round trip, and verifies the result with `nix derivation add
+--dry-run` in an isolated user-owned store.
 
 ## Rust API
 

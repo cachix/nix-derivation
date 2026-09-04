@@ -1,0 +1,32 @@
+{
+  "args": [],
+  "builder": "builtin:fetchurl",
+  "env": {
+    "builder": "builtin:fetchurl",
+    "executable": "1",
+    "impureEnvVars": "http_proxy https_proxy ftp_proxy all_proxy no_proxy",
+    "name": "busybox",
+    "out": "/nix/store/lan2w3ab1mvpxj3ppiw2sizh8i7rpz7s-busybox",
+    "outputHash": "ef4c1be6c7ae57e4f654efd90ae2d2e204d6769364c46469fa9ff3761195cba1",
+    "outputHashAlgo": "sha256",
+    "outputHashMode": "recursive",
+    "preferLocalBuild": "1",
+    "system": "builtin",
+    "unpack": "",
+    "url": "http://tarballs.nixos.org/stdenv-linux/i686/4907fc9e8d0d82b28b3c56e3a478a2882f1d700f/busybox",
+    "urls": "http://tarballs.nixos.org/stdenv-linux/i686/4907fc9e8d0d82b28b3c56e3a478a2882f1d700f/busybox"
+  },
+  "inputs": {
+    "drvs": {},
+    "srcs": []
+  },
+  "name": "busybox",
+  "outputs": {
+    "out": {
+      "hash": "sha256-70wb5seuV+T2VO/ZCuLS4gTWdpNkxGRp+p/zdhGVy6E=",
+      "method": "nar"
+    }
+  },
+  "system": "builtin",
+  "version": 4
+}

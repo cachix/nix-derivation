@@ -8,6 +8,8 @@ use thiserror::Error;
 /// Hash algorithms understood by Nix derivations and store paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HashAlgorithm {
+    /// BLAKE3.
+    Blake3,
     /// MD5.
     Md5,
     /// SHA-1.
@@ -23,6 +25,7 @@ impl HashAlgorithm {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Blake3 => "blake3",
             Self::Md5 => "md5",
             Self::Sha1 => "sha1",
             Self::Sha256 => "sha256",
@@ -32,6 +35,7 @@ impl HashAlgorithm {
 
     pub(crate) fn parse_bytes(value: &[u8]) -> Result<Self, Error> {
         match value {
+            b"blake3" => Ok(Self::Blake3),
             b"md5" => Ok(Self::Md5),
             b"sha1" => Ok(Self::Sha1),
             b"sha256" => Ok(Self::Sha256),
@@ -161,6 +165,8 @@ pub enum Error {
 /// algorithm/digest combination cannot be represented.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NixHash {
+    /// A BLAKE3 digest.
+    Blake3([u8; 32]),
     /// An MD5 digest.
     Md5([u8; 16]),
     /// A SHA-1 digest.
@@ -186,6 +192,7 @@ impl NixHash {
         }
 
         match algorithm {
+            HashAlgorithm::Blake3 => Ok(Self::Blake3(fit(HashAlgorithm::Blake3, digest)?)),
             HashAlgorithm::Md5 => Ok(Self::Md5(fit(HashAlgorithm::Md5, digest)?)),
             HashAlgorithm::Sha1 => Ok(Self::Sha1(fit(HashAlgorithm::Sha1, digest)?)),
             HashAlgorithm::Sha256 => Ok(Self::Sha256(fit(HashAlgorithm::Sha256, digest)?)),
@@ -199,6 +206,7 @@ impl NixHash {
     #[must_use]
     pub const fn algorithm(&self) -> HashAlgorithm {
         match self {
+            Self::Blake3(_) => HashAlgorithm::Blake3,
             Self::Md5(_) => HashAlgorithm::Md5,
             Self::Sha1(_) => HashAlgorithm::Sha1,
             Self::Sha256(_) => HashAlgorithm::Sha256,
@@ -210,6 +218,7 @@ impl NixHash {
     /// Return the unencoded digest bytes.
     pub fn digest_as_bytes(&self) -> &[u8] {
         match self {
+            Self::Blake3(digest) => digest,
             Self::Md5(digest) => digest,
             Self::Sha1(digest) => digest,
             Self::Sha256(digest) => digest,
@@ -288,6 +297,7 @@ impl FromStr for NixHash {
 
 fn digest_len(algo: &str) -> Result<usize, Error> {
     match algo.parse()? {
+        HashAlgorithm::Blake3 => Ok(32),
         HashAlgorithm::Md5 => Ok(16),
         HashAlgorithm::Sha1 => Ok(20),
         HashAlgorithm::Sha256 => Ok(32),
@@ -490,6 +500,19 @@ mod tests {
     }
 
     #[test]
+    fn blake3_hashes_round_trip_in_nix_and_sri_formats() {
+        let hash = NixHash::Blake3(std::array::from_fn(|i| i as u8));
+
+        for encoded in [
+            hash.to_nix_base16_string(),
+            hash.to_nix_nixbase32_string(),
+            hash.to_sri_string(),
+        ] {
+            assert_eq!(NixHash::parse(&encoded), Ok(hash.clone()), "{encoded}");
+        }
+    }
+
+    #[test]
     fn rejects_wrong_digest_length() {
         assert!(matches!(
             NixHash::parse("sha256-AA=="),
@@ -527,6 +550,10 @@ mod tests {
 
         assert!(matches!(
             CAHash::from_parts(ContentAddressMethod::Git, HashAlgorithm::Md5, &[0; 16]),
+            Err(Error::InvalidGitHashAlgorithm(_))
+        ));
+        assert!(matches!(
+            CAHash::from_parts(ContentAddressMethod::Git, HashAlgorithm::Blake3, &[0; 32]),
             Err(Error::InvalidGitHashAlgorithm(_))
         ));
     }

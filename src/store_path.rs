@@ -735,4 +735,19 @@ mod tests {
             Err(Error::InvalidGitHashAlgorithm(HashAlgorithm::Md5))
         ));
     }
+
+    #[test]
+    fn blake3_fixed_output_path_matches_nix() {
+        let path = build_ca_path(
+            "bootstrap-tools",
+            &CAHash::Nar(NixHash::Blake3([0; 32])),
+            std::iter::empty(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            path.to_absolute_path(),
+            "/nix/store/c7z644hg4imfjf3h861qjy0yhsand70i-bootstrap-tools"
+        );
+    }
 }

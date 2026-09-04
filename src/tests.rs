@@ -10,6 +10,8 @@ use crate::{
 
 #[test]
 fn output_hash_vocabulary_has_canonical_display_names() {
+    assert_eq!(HashAlgorithm::Blake3.to_string(), "blake3");
+    assert_eq!("blake3".parse(), Ok(HashAlgorithm::Blake3));
     assert_eq!(HashAlgorithm::Sha256.to_string(), "sha256");
     assert_eq!("sha256".parse(), Ok(HashAlgorithm::Sha256));
     assert_eq!(ContentAddressMethod::Nar.to_string(), "nar");

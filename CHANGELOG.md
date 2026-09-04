@@ -9,6 +9,8 @@ All notable changes to this project are documented in this file.
 - Parse and serialize Nix derivation JSON format version 4, including every
   output form, recursive dynamic inputs, structured attributes, configured
   logical stores, and Nix-compatible store-path and hash rendering.
+- Support BLAKE3 hashes in derivations, content addresses, and store-path
+  construction.
 
 ## [0.5.0] - 2026-09-04
 

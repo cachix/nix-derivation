@@ -1,0 +1,42 @@
+{
+  "args": [
+    "ash",
+    "-e",
+    "/nix/store/i9nx0dp1khrgikqr95ryy2jkigr4c5yv-unpack-bootstrap-tools.sh"
+  ],
+  "builder": "/nix/store/lan2w3ab1mvpxj3ppiw2sizh8i7rpz7s-busybox",
+  "env": {
+    "builder": "/nix/store/lan2w3ab1mvpxj3ppiw2sizh8i7rpz7s-busybox",
+    "hardeningUnsupportedFlags": "fortify3",
+    "isGNU": "1",
+    "langC": "1",
+    "langCC": "1",
+    "name": "bootstrap-tools",
+    "out": "/nix/store/dsn6vl7x1hbn1akgpxync19gpx2dzy8w-bootstrap-tools",
+    "system": "x86_64-linux",
+    "tarball": "/nix/store/cijs9ypwccmdfjhkq9a35nin7qizg6jm-bootstrap-tools.tar.xz"
+  },
+  "inputs": {
+    "drvs": {
+      "b7irlwi2wjlx5aj1dghx4c8k3ax6m56q-busybox.drv": {
+        "dynamicOutputs": {},
+        "outputs": ["out"]
+      },
+      "bzq60ip2z5xgi7jk6jgdw8cngfiwjrcm-bootstrap-tools.tar.xz.drv": {
+        "dynamicOutputs": {},
+        "outputs": ["out"]
+      }
+    },
+    "srcs": [
+      "i9nx0dp1khrgikqr95ryy2jkigr4c5yv-unpack-bootstrap-tools.sh"
+    ]
+  },
+  "name": "bootstrap-tools",
+  "outputs": {
+    "out": {
+      "path": "dsn6vl7x1hbn1akgpxync19gpx2dzy8w-bootstrap-tools"
+    }
+  },
+  "system": "x86_64-linux",
+  "version": 4
+}

@@ -177,7 +177,7 @@ fn store_root() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("corpus-store")
 }
 
-fn store_arg() -> String {
+pub fn store_arg() -> String {
     format!("local?root={}", store_root().display())
 }
 
