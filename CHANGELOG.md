@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Add generic `SingleDerivedPath` and `DerivedPath` models with typed,
+  store-aware parsing and rendering, legacy separator support, and a string
+  representation for transport boundaries. Their `serde` serialization uses
+  Nix's JSON representation.
+- Add the `DrvOutput` identity for a named derivation output, including Nix's
+  basename and store-aware absolute parse and render forms and JSON output.
+
 ## [0.4.0] - 2026-08-23
 
 ### Added

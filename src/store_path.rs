@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
+use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
@@ -261,6 +262,15 @@ impl fmt::Display for StorePath {
             nixbase32::encode(&self.digest),
             self.name
         )
+    }
+}
+
+impl Serialize for StorePath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_basename())
     }
 }
 

@@ -31,6 +31,7 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 mod builder;
+mod derived_path;
 pub mod hash;
 pub mod nixbase32;
 mod parser;
@@ -42,6 +43,7 @@ pub use builder::{
     DerivationBuilder, DynamicInputResolution, DynamicOutputReplacement, ExportReferencesGraph,
     ValidatedDerivation,
 };
+pub use derived_path::{DerivedPath, DrvOutput, DrvOutputParseError, SingleDerivedPath};
 pub use hash::{CAHash, ContentAddressMethod, HashAlgorithm, NixHash};
 pub use store_path::{StoreDir, StorePath};
 pub use structured_attrs::{StructuredAttrs, StructuredAttrsFiles};
