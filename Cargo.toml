@@ -16,9 +16,12 @@ antithesis = ["dep:antithesis-instrumentation", "dep:antithesis_sdk"]
 antithesis-instrumentation = { version = "0.1", optional = true }
 antithesis_sdk = { version = "0.2.9", optional = true }
 base64 = "0.22"
+blake3 = "1"
 memchr = "2"
+md-5 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value", "unbounded_depth"] }
+sha1 = "0.10"
 sha2 = "0.10"
 thiserror = "2"
 

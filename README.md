@@ -13,7 +13,7 @@ or C++ runtime, and all its dependencies are published Rust crates.
 | Parsing | Reads derivations as bytes, requires all input to be consumed, validates UTF-8 in text fields, and handles each field's Nix escaping rules. Environment values may contain arbitrary bytes. Duplicate map and set entries behave like they do in Nix. |
 | Serialization | Writes fields in Nix's canonical order, sorts maps and sets, applies Nix escaping, uses traditional syntax when no versioned node is needed, and can stream output through `std::io::Write`. |
 | Outputs | Input-addressed, fixed content-addressed, floating content-addressed, deferred, and impure outputs. Multi-output derivations and output placeholders are supported. |
-| Content addresses | Supports the flat, NAR, text, and Git ways of hashing content. BLAKE3, MD5, SHA-1, SHA-256, and SHA-512 values have their lengths checked by Rust's type system; Nix's restrictions on text and Git algorithms are also checked. |
+| Content addresses | Supports the flat, NAR, text, and Git ways of hashing content. `NixHasher` and `hash_bytes` compute BLAKE3, MD5, SHA-1, SHA-256, and SHA-512 digests, whose lengths are checked by Rust's type system; Nix's restrictions on text and Git algorithms are also checked. |
 | Inputs | Input sources, requested outputs from input derivations, and nested trees of dynamic outputs. Trees can be constructed, traversed without recursion with `walk()`, and measured with `max_depth()`. Parsing and construction enforce a depth limit of 256. |
 | Derived paths | Typed `DrvOutput` identities plus `SingleDerivedPath` and `DerivedPath` expressions, including dynamic-output chains, store-aware parsing, canonical text and Nix-compatible JSON rendering, and legacy `!` separators. |
 | Structured attributes | Reads `__json` as a JSON object supported by Nix while preserving its original bytes. Provides type-checked lookup and iteration, produces Nix-compatible canonical JSON (including float formatting), and generates `.attrs.json` and `.attrs.sh` files with concrete output paths for the builder. |
@@ -46,10 +46,10 @@ Canonical JSON bytes are generated only when first requested.
 ## Deliberate boundaries
 
 This crate does not evaluate Nix expressions, execute builders, implement a
-Nix store or database, serialize filesystem trees to NAR, or read filesystem
-contents to calculate a declared content digest. It accepts already-computed
-digests and implements the Nix metadata, hashing, and store-path algorithms
-that use them.
+Nix store or database, serialize filesystem trees to NAR, or decide which
+content-address framing a filesystem object requires. It can hash
+caller-supplied byte streams, and it implements the Nix metadata, hashing, and
+store-path algorithms that use the resulting digests.
 
 Generating an `exportReferencesGraph` structured attribute requires store
 metadata, so it is left to code that connects this crate to a store. Generating

@@ -1,6 +1,9 @@
 //! Typed Nix hashes and content addresses used by derivations.
 
 use base64::Engine as _;
+use md5::Md5;
+use sha1::Sha1;
+use sha2::{Digest as _, Sha256, Sha512};
 use std::fmt;
 use std::str::FromStr;
 use thiserror::Error;
@@ -295,6 +298,87 @@ impl FromStr for NixHash {
     }
 }
 
+enum HasherInner {
+    Blake3(Box<blake3::Hasher>),
+    Md5(Md5),
+    Sha1(Sha1),
+    Sha256(Sha256),
+    Sha512(Sha512),
+}
+
+/// An incremental hasher for every digest algorithm understood by Nix.
+///
+/// This type computes raw content digests. The caller remains responsible for
+/// applying flat, NAR, text, or Git content-address framing before feeding
+/// bytes to it.
+pub struct NixHasher {
+    algorithm: HashAlgorithm,
+    inner: HasherInner,
+}
+
+impl fmt::Debug for NixHasher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NixHasher")
+            .field("algorithm", &self.algorithm)
+            .finish_non_exhaustive()
+    }
+}
+
+impl NixHasher {
+    /// Start an incremental digest using `algorithm`.
+    #[must_use]
+    pub fn new(algorithm: HashAlgorithm) -> Self {
+        let inner = match algorithm {
+            HashAlgorithm::Blake3 => HasherInner::Blake3(Box::new(blake3::Hasher::new())),
+            HashAlgorithm::Md5 => HasherInner::Md5(Md5::new()),
+            HashAlgorithm::Sha1 => HasherInner::Sha1(Sha1::new()),
+            HashAlgorithm::Sha256 => HasherInner::Sha256(Sha256::new()),
+            HashAlgorithm::Sha512 => HasherInner::Sha512(Sha512::new()),
+        };
+        Self { algorithm, inner }
+    }
+
+    /// Return the selected digest algorithm.
+    #[must_use]
+    pub const fn algorithm(&self) -> HashAlgorithm {
+        self.algorithm
+    }
+
+    /// Feed another byte slice into the digest.
+    pub fn update(&mut self, bytes: &[u8]) {
+        match &mut self.inner {
+            HasherInner::Blake3(hasher) => {
+                hasher.update(bytes);
+            }
+            HasherInner::Md5(hasher) => hasher.update(bytes),
+            HasherInner::Sha1(hasher) => hasher.update(bytes),
+            HasherInner::Sha256(hasher) => hasher.update(bytes),
+            HasherInner::Sha512(hasher) => hasher.update(bytes),
+        }
+    }
+
+    /// Finish the digest and return a correctly tagged, fixed-size value.
+    #[must_use]
+    pub fn finalize(self) -> NixHash {
+        match self.inner {
+            HasherInner::Blake3(hasher) => NixHash::Blake3(*hasher.finalize().as_bytes()),
+            HasherInner::Md5(hasher) => NixHash::Md5(hasher.finalize().into()),
+            HasherInner::Sha1(hasher) => NixHash::Sha1(hasher.finalize().into()),
+            HasherInner::Sha256(hasher) => NixHash::Sha256(hasher.finalize().into()),
+            HasherInner::Sha512(hasher) => NixHash::Sha512(Box::new(hasher.finalize().into())),
+        }
+    }
+}
+
+/// Hash one byte slice with any digest algorithm understood by Nix.
+#[must_use]
+pub fn hash_bytes(algorithm: HashAlgorithm, bytes: &[u8]) -> NixHash {
+    let mut hasher = NixHasher::new(algorithm);
+    hasher.update(bytes);
+    hasher.finalize()
+}
+
 fn digest_len(algo: &str) -> Result<usize, Error> {
     match algo.parse()? {
         HashAlgorithm::Blake3 => Ok(32),
@@ -509,6 +593,42 @@ mod tests {
             hash.to_sri_string(),
         ] {
             assert_eq!(NixHash::parse(&encoded), Ok(hash.clone()), "{encoded}");
+        }
+    }
+
+    #[test]
+    fn incremental_hashing_matches_known_vectors() {
+        let vectors = [
+            (
+                HashAlgorithm::Blake3,
+                "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85",
+            ),
+            (HashAlgorithm::Md5, "900150983cd24fb0d6963f7d28e17f72"),
+            (
+                HashAlgorithm::Sha1,
+                "a9993e364706816aba3e25717850c26c9cd0d89d",
+            ),
+            (
+                HashAlgorithm::Sha256,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                HashAlgorithm::Sha512,
+                concat!(
+                    "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a",
+                    "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+                ),
+            ),
+        ];
+
+        for (algorithm, expected) in vectors {
+            let mut incremental = NixHasher::new(algorithm);
+            assert_eq!(incremental.algorithm(), algorithm);
+            incremental.update(b"a");
+            incremental.update(b"bc");
+            let incremental = incremental.finalize();
+            assert_eq!(encode_hex(incremental.digest_as_bytes()), expected);
+            assert_eq!(hash_bytes(algorithm, b"abc"), incremental);
         }
     }
 

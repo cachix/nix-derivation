@@ -45,7 +45,7 @@ pub use builder::{
     ValidatedDerivation,
 };
 pub use derived_path::{DerivedPath, DrvOutput, DrvOutputParseError, SingleDerivedPath};
-pub use hash::{CAHash, ContentAddressMethod, HashAlgorithm, NixHash};
+pub use hash::{CAHash, ContentAddressMethod, HashAlgorithm, NixHash, NixHasher, hash_bytes};
 pub use store_path::{StoreDir, StorePath};
 pub use structured_attrs::{StructuredAttrs, StructuredAttrsFiles};
 

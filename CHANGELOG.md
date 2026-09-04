@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Added
+
+- Add `NixHasher` and `hash_bytes` for incremental and one-shot BLAKE3, MD5,
+  SHA-1, SHA-256, and SHA-512 content hashing.
+
 ## [0.6.0] - 2026-09-04
 
 ### Added
