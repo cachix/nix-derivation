@@ -33,6 +33,7 @@ use thiserror::Error;
 mod builder;
 mod derived_path;
 pub mod hash;
+pub mod json;
 pub mod nixbase32;
 mod parser;
 pub mod store_path;
@@ -78,6 +79,17 @@ pub enum Error {
     /// The structured-attribute JSON or requested file materialization is invalid.
     #[error("invalid structured attributes: {0}")]
     StructuredAttrs(String),
+    /// The complete derivation JSON representation is malformed.
+    #[error("invalid derivation JSON: {0}")]
+    Json(String),
+    /// The JSON object uses a derivation format version this crate does not support.
+    #[error("unsupported derivation JSON format version {found}, expected {expected}")]
+    UnsupportedJsonVersion {
+        /// Version read from the JSON object.
+        found: u64,
+        /// Version supported by this release.
+        expected: u64,
+    },
     /// A fixed-output derivation does not have exactly one output named `out`.
     #[error(
         "fixed output derivation {name:?} has {outputs} outputs, expected exactly one named \"out\""
@@ -550,6 +562,16 @@ impl Derivation {
         parser::parse(bytes, name, store_dir)
     }
 
+    /// Parse Nix's complete derivation JSON format version 4.
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        json::from_slice(bytes)
+    }
+
+    /// Parse derivation JSON version 4 using a configured logical store.
+    pub fn from_json_bytes_in(bytes: &[u8], store_dir: StoreDir) -> Result<Self, Error> {
+        json::from_slice_in(bytes, store_dir)
+    }
+
     /// Consume this value for editing. [`DerivationBuilder::build`] validates
     /// the edited result before returning it.
     pub fn into_builder(self) -> DerivationBuilder {
@@ -625,6 +647,16 @@ impl Derivation {
         self.write_aterm(&mut bytes)
             .expect("writing a derivation to Vec cannot fail");
         bytes
+    }
+
+    /// Write Nix's complete derivation JSON format version 4.
+    pub fn write_json<W: io::Write + ?Sized>(&self, writer: &mut W) -> Result<(), Error> {
+        json::write(self, writer)
+    }
+
+    /// Serialize as compact derivation JSON format version 4.
+    pub fn to_json_bytes(&self) -> Result<Vec<u8>, Error> {
+        json::to_vec(self)
     }
 
     /// Input derivations including recursively requested dynamic outputs.

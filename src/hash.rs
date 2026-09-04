@@ -246,12 +246,8 @@ impl NixHash {
 
     /// Parse SRI or `algo:` followed by Nix base32, base16, or base64.
     pub fn parse(input: &str) -> Result<Self, Error> {
-        if let Some((algo, encoded)) = input.split_once('-') {
-            let expected = digest_len(algo)?;
-            let digest = decode_base64(encoded)
-                .filter(|digest| digest.len() == expected)
-                .ok_or_else(|| Error::Unparseable(input.to_owned()))?;
-            return Self::from_algorithm_and_digest(algo.parse()?, &digest);
+        if input.contains('-') {
+            return Self::parse_sri(input);
         }
 
         let (algo, encoded) = input
@@ -266,6 +262,18 @@ impl NixHash {
         } else {
             decode_base64(encoded).ok_or_else(|| Error::Unparseable(input.to_owned()))?
         };
+        Self::from_algorithm_and_digest(algo.parse()?, &digest)
+    }
+
+    /// Parse an SRI `algo-base64` hash without accepting legacy Nix encodings.
+    pub(crate) fn parse_sri(input: &str) -> Result<Self, Error> {
+        let (algo, encoded) = input
+            .split_once('-')
+            .ok_or_else(|| Error::Unparseable(input.to_owned()))?;
+        let expected = digest_len(algo)?;
+        let digest = decode_base64(encoded)
+            .filter(|digest| digest.len() == expected)
+            .ok_or_else(|| Error::Unparseable(input.to_owned()))?;
         Self::from_algorithm_and_digest(algo.parse()?, &digest)
     }
 }
@@ -458,6 +466,26 @@ mod tests {
 
         for encoded in [&hex, &nix32, &sri, &base64] {
             assert_eq!(encoded.parse(), Ok(hash.clone()), "{encoded}");
+        }
+    }
+
+    #[test]
+    fn sri_parser_rejects_legacy_nix_hash_formats() {
+        let hash = sha256();
+        assert_eq!(NixHash::parse_sri(&hash.to_sri_string()), Ok(hash.clone()));
+
+        for encoded in [
+            hash.to_nix_base16_string(),
+            hash.to_nix_nixbase32_string(),
+            format!(
+                "sha256:{}",
+                base64::engine::general_purpose::STANDARD.encode(hash.digest_as_bytes())
+            ),
+        ] {
+            assert!(matches!(
+                NixHash::parse_sri(&encoded),
+                Err(Error::Unparseable(_))
+            ));
         }
     }
 

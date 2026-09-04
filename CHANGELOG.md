@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Added
+
+- Parse and serialize Nix derivation JSON format version 4, including every
+  output form, recursive dynamic inputs, structured attributes, configured
+  logical stores, and Nix-compatible store-path and hash rendering.
+
 ## [0.5.0] - 2026-09-04
 
 ### Added

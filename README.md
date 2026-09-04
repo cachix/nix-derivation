@@ -9,6 +9,7 @@ or C++ runtime, and all its dependencies are published Rust crates.
 | Area | Supported features |
 | --- | --- |
 | Derivation syntax | Traditional `Derive(...)` ATerms and versioned `DrvWithVersion("xp-dyn-drv",...)` ATerms used for recursive dynamic derivations. |
+| Derivation JSON | Parses and writes Nix derivation JSON format version 4, including all output variants, recursive `dynamicOutputs`, structured attributes, and custom logical store directories. |
 | Parsing | Reads derivations as bytes, requires all input to be consumed, validates UTF-8 in text fields, and handles each field's Nix escaping rules. Environment values may contain arbitrary bytes. Duplicate map and set entries behave like they do in Nix. |
 | Serialization | Writes fields in Nix's canonical order, sorts maps and sets, applies Nix escaping, uses traditional syntax when no versioned node is needed, and can stream output through `std::io::Write`. |
 | Outputs | Input-addressed, fixed content-addressed, floating content-addressed, deferred, and impure outputs. Multi-output derivations and output placeholders are supported. |
@@ -97,6 +98,11 @@ edit.arguments_mut().push("--verbose".to_owned());
 let drv = edit.build()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+Complete derivation JSON is available through
+`Derivation::from_json_bytes`, `Derivation::to_json_bytes`, and the streaming
+and custom-store variants in the `json` module. Store paths inside JSON use
+Nix's canonical basename form.
 
 The builder recalculates input-addressed paths and their environment entries
 using Nix's required rules for hiding output values during hashing. Deferred
