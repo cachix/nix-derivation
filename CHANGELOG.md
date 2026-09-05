@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Add derivation CBOR format version 1 with deterministic encoding, arbitrary
+  environment bytes, all output forms, dynamic inputs, structured attributes,
+  streaming writes, and custom-store parsing. CBOR round trips preserve
+  canonical ATerm bytes and Nix identities.
+
 ## [0.6.1] - 2026-09-04
 
 ### Added

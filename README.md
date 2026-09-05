@@ -10,8 +10,9 @@ or C++ runtime, and all its dependencies are published Rust crates.
 | --- | --- |
 | Derivation syntax | Traditional `Derive(...)` ATerms and versioned `DrvWithVersion("xp-dyn-drv",...)` ATerms used for recursive dynamic derivations. |
 | Derivation JSON | Parses and writes Nix derivation JSON format version 4, including all output variants, recursive `dynamicOutputs`, structured attributes, and custom logical store directories. |
-| Parsing | Reads derivations as bytes, requires all input to be consumed, validates UTF-8 in text fields, and handles each field's Nix escaping rules. Environment values may contain arbitrary bytes. Duplicate map and set entries behave like they do in Nix. |
-| Serialization | Writes fields in Nix's canonical order, sorts maps and sets, applies Nix escaping, uses traditional syntax when no versioned node is needed, and can stream output through `std::io::Write`. |
+| Derivation CBOR | Parses and writes the crate's version 1 lossless interchange format with binary environment values and deterministic encoding. Preserves canonical ATerm bytes and Nix hashes. |
+| ATerm parsing | Reads derivations as bytes, requires all input to be consumed, validates UTF-8 in text fields, and handles each field's Nix escaping rules. Environment values may contain arbitrary bytes. Duplicate map and set entries behave like they do in Nix. |
+| ATerm serialization | Writes fields in Nix's canonical order, sorts maps and sets, applies Nix escaping, uses traditional syntax when no versioned node is needed, and can stream output through `std::io::Write`. |
 | Outputs | Input-addressed, fixed content-addressed, floating content-addressed, deferred, and impure outputs. Multi-output derivations and output placeholders are supported. |
 | Content addresses | Supports the flat, NAR, text, and Git ways of hashing content. `NixHasher` and `hash_bytes` compute BLAKE3, MD5, SHA-1, SHA-256, and SHA-512 digests, whose lengths are checked by Rust's type system; Nix's restrictions on text and Git algorithms are also checked. |
 | Inputs | Input sources, requested outputs from input derivations, and nested trees of dynamic outputs. Trees can be constructed, traversed without recursion with `walk()`, and measured with `max_depth()`. Parsing and construction enforce a depth limit of 256. |
@@ -27,7 +28,7 @@ of bytes.
 
 Parsing and validation are deliberately separate. `Derivation` can inspect and
 serialize syntactically valid test cases even when they are not valid build
-recipes. Serialization always uses Nix's canonical format.
+recipes. ATerm serialization always uses Nix's canonical format.
 `Derivation::validate`,
 `Derivation::into_validated`, and `DerivationBuilder::build` enforce rules such
 as a nonempty output set, consistent output types, the single `out` rule for
@@ -107,6 +108,15 @@ Complete derivation JSON is available through
 `Derivation::from_json_bytes`, `Derivation::to_json_bytes`, and the streaming
 and custom-store variants in the `json` module. Store paths inside JSON use
 Nix's canonical basename form.
+
+For environment values containing arbitrary bytes, use
+`Derivation::from_cbor_bytes`, `Derivation::to_cbor_bytes`, and the streaming
+and custom-store variants in the `cbor` module. The crate's
+[CBOR format version 1](docs/cbor.md) uses explicit byte strings and RFC 8949
+deterministic encoding. Structured attributes are carried as canonical JSON
+bytes. This is an additional interchange format; Nix identities still use
+ATerm. JSON serialization returns `Error::InvalidUtf8` for non-UTF-8
+environment values.
 
 The builder recalculates input-addressed paths and their environment entries
 using Nix's required rules for hiding output values during hashing. Deferred

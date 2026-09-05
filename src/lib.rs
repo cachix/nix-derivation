@@ -31,6 +31,7 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 mod builder;
+pub mod cbor;
 mod derived_path;
 pub mod hash;
 pub mod json;
@@ -82,6 +83,17 @@ pub enum Error {
     /// The complete derivation JSON representation is malformed.
     #[error("invalid derivation JSON: {0}")]
     Json(String),
+    /// A derivation CBOR document is malformed or cannot be written.
+    #[error("invalid derivation CBOR: {0}")]
+    Cbor(String),
+    /// The CBOR format version is not supported by this release.
+    #[error("unsupported derivation CBOR version {found}; expected {expected}")]
+    UnsupportedCborVersion {
+        /// Version read from the CBOR document.
+        found: u64,
+        /// Version supported by this release.
+        expected: u64,
+    },
     /// The JSON object uses a derivation format version this crate does not support.
     #[error("unsupported derivation JSON format version {found}, expected {expected}")]
     UnsupportedJsonVersion {
@@ -572,6 +584,16 @@ impl Derivation {
         json::from_slice_in(bytes, store_dir)
     }
 
+    /// Parse the crate's lossless derivation CBOR format version 1.
+    pub fn from_cbor_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        cbor::from_slice(bytes)
+    }
+
+    /// Parse derivation CBOR using a configured logical store directory.
+    pub fn from_cbor_bytes_in(bytes: &[u8], store_dir: StoreDir) -> Result<Self, Error> {
+        cbor::from_slice_in(bytes, store_dir)
+    }
+
     /// Consume this value for editing. [`DerivationBuilder::build`] validates
     /// the edited result before returning it.
     pub fn into_builder(self) -> DerivationBuilder {
@@ -657,6 +679,16 @@ impl Derivation {
     /// Serialize as compact derivation JSON format version 4.
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, Error> {
         json::to_vec(self)
+    }
+
+    /// Write the crate's deterministic derivation CBOR format version 1.
+    pub fn write_cbor<W: io::Write + ?Sized>(&self, writer: &mut W) -> Result<(), Error> {
+        cbor::write(self, writer)
+    }
+
+    /// Serialize as deterministic derivation CBOR format version 1.
+    pub fn to_cbor_bytes(&self) -> Result<Vec<u8>, Error> {
+        cbor::to_vec(self)
     }
 
     /// Input derivations including recursively requested dynamic outputs.
