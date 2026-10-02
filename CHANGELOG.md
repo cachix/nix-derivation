@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Add `Derivation::structured_attrs_files_with_reference_graphs`, which
+  writes `.attrs.json` and `.attrs.sh` for structured attributes that use
+  `exportReferencesGraph`, given each graph's closure from the caller.
+
+### Changed
+
+- Ignore an `exportReferencesGraph` structured attribute that is not an
+  object when generating the structured files, as Nix does, instead of
+  returning an error.
+
 ## [0.6.1] - 2026-09-04
 
 ### Added

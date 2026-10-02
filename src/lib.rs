@@ -1147,6 +1147,23 @@ impl Derivation {
     /// Materialize `.attrs.json` and `.attrs.sh` when this derivation uses
     /// structured attributes.
     pub fn structured_attrs_files(&self) -> Result<Option<StructuredAttrsFiles>, Error> {
+        self.structured_attrs_files_with_reference_graphs(&BTreeMap::new())
+    }
+
+    /// Materialize `.attrs.json` and `.attrs.sh` for structured attributes
+    /// that use `exportReferencesGraph`.
+    ///
+    /// A graph's contents come from a store, so the caller supplies them:
+    /// for each key of `exportReferencesGraph`, the value Nix sets under
+    /// that key, a list with one object per path of the key's closure
+    /// holding its `closureSize`, `narHash`, `narSize`, `path`,
+    /// `references`, `valid` and, for a content-addressed path, `ca`. The
+    /// keys of `reference_graphs` must be exactly those of
+    /// `exportReferencesGraph`.
+    pub fn structured_attrs_files_with_reference_graphs(
+        &self,
+        reference_graphs: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<Option<StructuredAttrsFiles>, Error> {
         let Some(attrs) = self.structured_attrs.as_ref() else {
             return Ok(None);
         };
@@ -1168,6 +1185,7 @@ impl Derivation {
             attrs,
             &self.store_dir,
             &output_paths,
+            reference_graphs,
         )?))
     }
 
@@ -1193,6 +1211,7 @@ impl Derivation {
             attrs,
             &self.store_dir,
             output_paths,
+            &BTreeMap::new(),
         )?))
     }
 }

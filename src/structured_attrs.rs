@@ -134,13 +134,42 @@ pub(super) fn files(
     attrs: &StructuredAttrs,
     store_dir: &StoreDir,
     output_paths: &BTreeMap<String, StorePath>,
+    reference_graphs: &BTreeMap<String, Value>,
 ) -> Result<StructuredAttrsFiles, Error> {
     let object = attrs.object();
-    if object.contains_key("exportReferencesGraph") {
-        return Err(Error::StructuredAttrs(
-            "exportReferencesGraph requires store metadata and cannot be generated here".to_owned(),
-        ));
+    let requested = requested_reference_graphs(object);
+    if !requested
+        .iter()
+        .copied()
+        .eq(reference_graphs.keys().map(String::as_str))
+    {
+        if reference_graphs.is_empty() {
+            return Err(Error::StructuredAttrs(
+                "exportReferencesGraph requires store metadata and cannot be generated here"
+                    .to_owned(),
+            ));
+        }
+        return Err(Error::StructuredAttrs(format!(
+            "reference graphs were supplied for {:?}, but exportReferencesGraph names {requested:?}",
+            reference_graphs.keys().collect::<Vec<_>>()
+        )));
     }
+
+    // Nix sets each graph as a top-level attribute, replacing any attribute
+    // of the same name.
+    let object = if reference_graphs.is_empty() {
+        Cow::Borrowed(object)
+    } else {
+        let mut object = object.clone();
+        for (key, graph) in reference_graphs {
+            let mut graph = graph.clone();
+            sort_value(&mut graph);
+            object.insert(key.clone(), graph);
+        }
+        object.sort_keys();
+        Cow::Owned(object)
+    };
+    let object = object.as_ref();
 
     if output_paths.is_empty() {
         return Err(Error::StructuredAttrs(
@@ -155,6 +184,15 @@ pub(super) fn files(
         json,
         shell: write_attrs_shell(object, &replacements).into_bytes(),
     })
+}
+
+/// The keys of `exportReferencesGraph`, which Nix ignores with a warning
+/// when it is not an object.
+fn requested_reference_graphs(object: &Map<String, Value>) -> Vec<&str> {
+    match object.get("exportReferencesGraph") {
+        Some(Value::Object(graphs)) => graphs.keys().map(String::as_str).collect(),
+        _ => Vec::new(),
+    }
 }
 
 struct OutputReplacement<'a> {
