@@ -53,7 +53,9 @@ store-path algorithms that use the resulting digests.
 
 Generating an `exportReferencesGraph` structured attribute requires store
 metadata, so it is left to code that connects this crate to a store. Generating
-the structured files without store access returns an error for this attribute.
+the structured files without store access returns an error for this attribute;
+`structured_attrs_files_with_reference_graphs` takes the closures from the
+caller and writes them where Nix does.
 
 ## Compatibility and tests
 

@@ -304,6 +304,84 @@ fn structured_attrs_match_nix_shell_shape() {
     );
 }
 
+// exportReferencesGraph needs store metadata, so the plain file generators
+// refuse it. With the closures supplied for exactly the keys it names, each
+// closure is written into .attrs.json under its key, as Nix writes it, and
+// .attrs.sh leaves the non-scalar values out.
+#[test]
+fn structured_attrs_files_take_supplied_reference_graphs() {
+    let dep = "/nix/store/22222222222222222222222222222222-dep";
+    let json = format!(r#"{{"exportReferencesGraph":{{"closure":["{dep}"]}},"outputs":["out"]}}"#);
+    let escaped_json = json.replace('"', "\\\"");
+    let bytes = aterm(
+        &format!("(\"out\",\"{PATH}\",\"\",\"\")"),
+        &format!("(\"__json\",\"{escaped_json}\")"),
+    );
+    let derivation = Derivation::from_aterm_bytes(&bytes, "example").unwrap();
+    assert!(derivation.structured_attrs_files().is_err());
+
+    let closure = serde_json::json!([{
+        "path": dep,
+        "narSize": 8,
+        "narHash": "sha256:1b8m03r63zqhnjf7l5wnldhh7c134ap5vpj0850ymkq1iyzicy5s",
+        "references": [],
+        "valid": true,
+        "closureSize": 8,
+    }]);
+    let graphs = BTreeMap::from([("closure".to_owned(), closure)]);
+    let files = derivation
+        .structured_attrs_files_with_reference_graphs(&graphs)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        files.json,
+        format!(
+            r#"{{"closure":[{{"closureSize":8,"narHash":"sha256:1b8m03r63zqhnjf7l5wnldhh7c134ap5vpj0850ymkq1iyzicy5s","narSize":8,"path":"{dep}","references":[],"valid":true}}],"exportReferencesGraph":{{"closure":["{dep}"]}},"outputs":{{"out":"{PATH}"}}}}"#
+        )
+        .as_bytes()
+    );
+    assert_eq!(
+        files.shell,
+        format!("declare -A outputs=(['out']='{PATH}' )\n").as_bytes()
+    );
+
+    // A graph for a key exportReferencesGraph does not name, or a missing
+    // one, is an error.
+    let extra = BTreeMap::from([
+        ("closure".to_owned(), serde_json::json!([])),
+        ("other".to_owned(), serde_json::json!([])),
+    ]);
+    assert!(
+        derivation
+            .structured_attrs_files_with_reference_graphs(&extra)
+            .is_err()
+    );
+    assert!(
+        derivation
+            .structured_attrs_files_with_reference_graphs(&BTreeMap::new())
+            .is_err()
+    );
+}
+
+// Nix ignores an exportReferencesGraph that is not an object, with a
+// warning, so the files are generated without any graph.
+#[test]
+fn structured_attrs_files_ignore_a_non_object_reference_graph() {
+    let json = r#"{"exportReferencesGraph":["closure"],"outputs":["out"]}"#;
+    let escaped_json = json.replace('"', "\\\"");
+    let bytes = aterm(
+        &format!("(\"out\",\"{PATH}\",\"\",\"\")"),
+        &format!("(\"__json\",\"{escaped_json}\")"),
+    );
+    let derivation = Derivation::from_aterm_bytes(&bytes, "example").unwrap();
+    let files = derivation.structured_attrs_files().unwrap().unwrap();
+    assert_eq!(
+        files.json,
+        format!(r#"{{"exportReferencesGraph":["closure"],"outputs":{{"out":"{PATH}"}}}}"#)
+            .as_bytes()
+    );
+}
+
 #[test]
 fn structured_attrs_files_merge_outputs_and_rewrite_borrowed_values() {
     let out_placeholder = store_path::hash_placeholder("out");
@@ -322,8 +400,13 @@ fn structured_attrs_files_merge_outputs_and_rewrite_borrowed_values() {
         ("out".to_owned(), out.parse().unwrap()),
     ]);
 
-    let files =
-        crate::structured_attrs::files(&attrs, &crate::StoreDir::default(), &output_paths).unwrap();
+    let files = crate::structured_attrs::files(
+        &attrs,
+        &crate::StoreDir::default(),
+        &output_paths,
+        &BTreeMap::new(),
+    )
+    .unwrap();
 
     assert_eq!(
         files.json,
@@ -362,8 +445,13 @@ fn structured_attrs_files_rewrite_many_repeated_placeholders() {
         ("out".to_owned(), out.parse().unwrap()),
     ]);
 
-    let files =
-        crate::structured_attrs::files(&attrs, &crate::StoreDir::default(), &output_paths).unwrap();
+    let files = crate::structured_attrs::files(
+        &attrs,
+        &crate::StoreDir::default(),
+        &output_paths,
+        &BTreeMap::new(),
+    )
+    .unwrap();
     let expected_message = out.repeat(REPETITIONS);
 
     assert_eq!(
